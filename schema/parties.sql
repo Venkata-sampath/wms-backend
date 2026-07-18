@@ -2,7 +2,7 @@ DROP TABLE IF EXISTS parties;
 
 CREATE TABLE parties (
     id TEXT PRIMARY KEY,
-    warehouse_id TEXT NOT NULL,
+    warehouse_id TEXT NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     gstin TEXT NOT NULL,
     address TEXT,

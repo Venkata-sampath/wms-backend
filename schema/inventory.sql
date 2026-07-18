@@ -2,8 +2,8 @@ DROP TABLE IF EXISTS inventory;
 
 CREATE TABLE inventory (
     id TEXT PRIMARY KEY,
-    warehouse_id TEXT NOT NULL,
-    location_id TEXT NOT NULL,
+    warehouse_id TEXT NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
+    location_id TEXT NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
     item_code TEXT NOT NULL,
     item_description TEXT,
     quantity REAL NOT NULL,
