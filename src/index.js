@@ -1187,13 +1187,6 @@ export default {
           return isNaN(parsed) ? 0 : parsed;
         };
 
-        const cleanInt = (val) => {
-          if (val === undefined || val === null || String(val).trim() === "")
-            return 0;
-          const parsed = parseInt(String(val).replace(/,/g, ""), 10);
-          return isNaN(parsed) ? 0 : parsed;
-        };
-
         const cleanDateField = (val) => {
           if (val === undefined || val === null) return null;
           const trimmed = String(val).trim();
@@ -1291,21 +1284,21 @@ export default {
             );
             const resolvedExpiryDate = cleanDateField(item.expiry_date);
 
+            // Completely removed sl_no from columns, placeholders, and bindings
             batchStatements.push(
               env.DB.prepare(
                 `
             INSERT INTO shipment_line_items (
-              id, shipment_id, sl_no, item_code, item_description, hsn_sac, 
+              id, shipment_id, item_code, item_description, hsn_sac, 
               ordered_quantity, uom, rate, gross_amount, discount_amount, taxable_amount, 
               tax_rate_percent, cgst, sgst, igst, cess, total_amount,
               category, received_quantity, damaged_quantity, shortage_quantity, excess_quantity, 
               discrepancy_uom, discrepancy_notes, manufacturing_date, expiry_date
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `,
               ).bind(
                 crypto.randomUUID(),
                 shipmentId,
-                cleanInt(item.sl_no),
                 String(item.item_code || "").trim(),
                 String(item.item_description || "Unknown Item").trim(),
                 String(item.hsn_sac || "").trim(),
@@ -2113,7 +2106,7 @@ export default {
               .first();
 
             const lineItems = await env.DB.prepare(
-              "SELECT * FROM shipment_line_items WHERE shipment_id = ? ORDER BY sl_no ASC",
+              "SELECT * FROM shipment_line_items WHERE shipment_id = ? ORDER BY rowid ASC",
             )
               .bind(transaction.reference_id)
               .all();
@@ -2380,7 +2373,6 @@ async function aggregateShipmentData(shipmentId, env) {
         rawItemCode !== "" && rawItemCode === rawHsnSac ? "" : rawItemCode;
 
       return {
-        sl_no: index + 1,
         item_code: resolvedItemCode,
         item_description: item.item_description || "",
         hsn_sac: item.hsn_sac || "",
