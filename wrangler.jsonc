@@ -1,43 +1,51 @@
-/**
- * For more details on how to configure Wrangler, refer to:
- * https://developers.cloudflare.com/workers/wrangler/configuration/
- */
 {
-	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "wms",
-	"compatibility_date": "2026-06-25",
-	"assets": {
-		// The path to the directory containing the `index.html` file to be served at `/`
-		"directory": "./public"
-	},
-	"observability": {
-		"enabled": true
-	},
-	"upload_source_maps": true,
-	"compatibility_flags": [
-		"nodejs_compat"
-	]
-	/**
-	 * Smart Placement
-	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
-	 */
-	// "placement": {  "mode": "smart" }
-	/**
-	 * Bindings
-	 * Bindings allow your Worker to interact with resources on the Cloudflare Developer Platform, including
-	 * databases, object storage, AI inference, real-time communication and more.
-	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/
-	 */
-	/**
-	 * Environment Variables
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
-	 * Note: Use secrets to store sensitive data.
-	 * https://developers.cloudflare.com/workers/configuration/secrets/
-	 */
-	// "vars": {  "MY_VARIABLE": "production_value" }
-	/**
-	 * Service Bindings (communicate between multiple Workers)
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
-	 */
-	// "services": [  {   "binding": "MY_SERVICE",   "service": "my-service"  } ]
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "wms",
+  "main": "src/index.js",
+  "compatibility_date": "2026-06-25",
+  "vars": {
+    "MODEL": "meta-llama/llama-3.1-8b-instruct",
+    "CLOUDINARY_CLOUD_NAME": "dyjam1u7r",
+    "WORKER_SELF_URL": "https://wms.satyaramsl72.workers.dev",
+    "RUNPOD_OCR_POD_ORCHESTRATOR_URL": "https://ayrhgnyjfv6ehr-8001.proxy.runpod.net",
+  },
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+    },
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "wms-db",
+      "database_id": "a7b33623-a752-4481-ad80-b6f862c48900",
+      "remote": true,
+    },
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "OCR_QUEUE", "queue": "ocr-queue" },
+      { "binding": "LLM_QUEUE", "queue": "llm-queue" },
+    ],
+    "consumers": [
+      {
+        "queue": "ocr-queue",
+        "max_batch_size": 1,
+        "max_concurrency": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "ocr-dlq",
+      },
+      {
+        "queue": "llm-queue",
+        "max_batch_size": 1,
+        "max_concurrency": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "llm-dlq",
+      },
+    ],
+  },
+  "triggers": {
+    "crons": ["*/5 * * * *"],
+  },
 }
