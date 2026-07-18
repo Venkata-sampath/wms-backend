@@ -6,8 +6,8 @@ CREATE TABLE transactions (
     transaction_type TEXT NOT NULL,
     reference_id TEXT NOT NULL,
     status TEXT NOT NULL,
-    created_by_user_id TEXT,
-    completed_by_user_id TEXT,
+    created_by_user_id TEXT NOT NULL REFERENCES users(id),
+    completed_by_user_id TEXT NOT NULL REFERENCES users(id),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     completed_at DATETIME,
     remarks TEXT
