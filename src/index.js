@@ -1128,7 +1128,6 @@ export default {
           );
         }
 
-        // Enforce 3 Party Roles only
         const roles = ["seller", "bill_to", "ship_to"];
         let resolvedPartyIds = {};
 
@@ -1141,7 +1140,6 @@ export default {
 
           const cleanGstin = String(party.gstin).trim().toUpperCase();
 
-          // GSTIN Rule: Must be exactly 15 characters
           if (cleanGstin.length !== 15) {
             return new Response(
               JSON.stringify({
@@ -1151,7 +1149,6 @@ export default {
             );
           }
 
-          // Party Resolution: Search parties table by warehouse_id and gstin
           let existingParty = await env.DB.prepare(
             "SELECT id FROM parties WHERE gstin = ? AND warehouse_id = ?",
           )
@@ -1159,10 +1156,8 @@ export default {
             .first();
 
           if (existingParty) {
-            // Reuse existing party ID without updating master table fields
             resolvedPartyIds[role] = existingParty.id;
           } else {
-            // Insert new party entry
             const newPartyId = crypto.randomUUID();
             await env.DB.prepare(
               "INSERT INTO parties (id, warehouse_id, name, gstin, address) VALUES (?, ?, ?, ?, ?)",
@@ -1211,7 +1206,7 @@ export default {
 
         const batchStatements = [];
 
-        // Idempotency cleanup queries
+        // Idempotency cleanups
         batchStatements.push(
           env.DB.prepare(
             "DELETE FROM shipment_details WHERE id = ? AND warehouse_id = ?",
@@ -1238,16 +1233,12 @@ export default {
           ).bind(shipmentId, auth.context.warehouse_id),
         );
 
-        // Insert Shipment Details referencing updated party columns
         batchStatements.push(
           env.DB.prepare(
-            `
-        INSERT INTO shipment_details (
+            `INSERT INTO shipment_details (
           id, invoice_number, invoice_date, po_number, lr_number, e_way_bill_number, vehicle_number, driver_name, driver_phone_number,
-          seller_party_id, bill_to_party_id, ship_to_party_id,
-          additional_data, warehouse_id, verified_by_user_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `,
+          seller_party_id, bill_to_party_id, ship_to_party_id, additional_data, warehouse_id, verified_by_user_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             shipmentId,
             String(header.invoice_number || "").trim(),
@@ -1284,26 +1275,27 @@ export default {
             );
             const resolvedExpiryDate = cleanDateField(item.expiry_date);
 
-            // Completely removed sl_no from columns, placeholders, and bindings
+            // Generate the exact shipment line item ID once
+            const lineItemId = crypto.randomUUID();
+            const verifiedUom = String(item.uom || "PCS").trim();
+
             batchStatements.push(
               env.DB.prepare(
-                `
-            INSERT INTO shipment_line_items (
+                `INSERT INTO shipment_line_items (
               id, shipment_id, item_code, item_description, hsn_sac, 
               ordered_quantity, uom, rate, gross_amount, discount_amount, taxable_amount, 
               tax_rate_percent, cgst, sgst, igst, cess, total_amount,
               category, received_quantity, damaged_quantity, shortage_quantity, excess_quantity, 
               discrepancy_uom, discrepancy_notes, manufacturing_date, expiry_date
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               ).bind(
-                crypto.randomUUID(),
+                lineItemId,
                 shipmentId,
                 String(item.item_code || "").trim(),
                 String(item.item_description || "Unknown Item").trim(),
                 String(item.hsn_sac || "").trim(),
                 cleanFloat(item.ordered_quantity),
-                String(item.uom || "PCS").trim(),
+                verifiedUom,
                 cleanFloat(item.rate),
                 cleanFloat(item.gross_amount),
                 cleanFloat(item.discount_amount),
@@ -1330,10 +1322,8 @@ export default {
             if (targetPutawayQty > 0) {
               batchStatements.push(
                 env.DB.prepare(
-                  `
-              INSERT INTO putaway_task_items (id, putaway_task_id, item_code, item_description, quantity_to_place, category, expiry_date, manufacturing_date)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-              `,
+                  `INSERT INTO putaway_task_items (id, putaway_task_id, item_code, item_description, quantity_to_place, category, expiry_date, manufacturing_date, shipment_line_item_id, uom)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 ).bind(
                   "pti_" + crypto.randomUUID(),
                   putawayTaskId,
@@ -1343,6 +1333,8 @@ export default {
                   resolvedCategory,
                   resolvedExpiryDate,
                   resolvedManufacturingDate,
+                  lineItemId, // Exact reference mapping
+                  verifiedUom, // Forwarded UOM metadata
                 ),
               );
             }
@@ -1358,12 +1350,8 @@ export default {
         const transactionId = "txn_" + crypto.randomUUID();
         batchStatements.push(
           env.DB.prepare(
-            `
-        INSERT INTO transactions (
-          id, warehouse_id, transaction_type, reference_id, status,
-          created_by_user_id, completed_by_user_id, completed_at, remarks
-        ) VALUES (?, ?, 'inbound', ?, 'pending_putaway', ?, NULL, NULL, NULL)
-        `,
+            `INSERT INTO transactions (id, warehouse_id, transaction_type, reference_id, status, created_by_user_id, completed_by_user_id, completed_at, remarks)
+        VALUES (?, ?, 'inbound', ?, 'pending_putaway', ?, NULL, NULL, NULL)`,
           ).bind(
             transactionId,
             auth.context.warehouse_id,
@@ -1646,13 +1634,12 @@ export default {
       }
 
       try {
-        // 1. Fetch all pending task headers for this warehouse
         const tasksQuery = await env.DB.prepare(
           `SELECT t.id, t.shipment_id, t.created_at, d.invoice_number, d.vehicle_number 
-           FROM putaway_tasks t
-           LEFT JOIN shipment_details d ON t.shipment_id = d.id
-           WHERE t.warehouse_id = ? AND t.status = 'pending'
-           ORDER BY t.created_at DESC`,
+       FROM putaway_tasks t
+       LEFT JOIN shipment_details d ON t.shipment_id = d.id
+       WHERE t.warehouse_id = ? AND t.status = 'pending'
+       ORDER BY t.created_at DESC`,
         )
           .bind(auth.context.warehouse_id)
           .all();
@@ -1666,22 +1653,20 @@ export default {
           });
         }
 
-        // 2. Fetch all matching line items for these pending tasks
         const taskIds = pendingTasks.map((t) => t.id);
-        // Build a parameterized safe mapping array string for SQL IN clause
         const placeholders = taskIds.map(() => "?").join(",");
 
+        // Appended shipment_line_item_id and uom fields
         const itemsQuery = await env.DB.prepare(
-          `SELECT putaway_task_id, id, item_code, item_description, quantity_to_place, category, manufacturing_date, expiry_date
-           FROM putaway_task_items 
-           WHERE putaway_task_id IN (${placeholders})`,
+          `SELECT putaway_task_id, id, item_code, item_description, quantity_to_place, category, manufacturing_date, expiry_date, shipment_line_item_id, uom
+       FROM putaway_task_items 
+       WHERE putaway_task_id IN (${placeholders})`,
         )
           .bind(...taskIds)
           .all();
 
         const allItems = itemsQuery.results;
 
-        // 3. Nest items cleanly inside their respective task parents
         const responseData = pendingTasks.map((task) => {
           return {
             ...task,
@@ -1741,9 +1726,6 @@ export default {
           );
         }
 
-        // 1. Verify the targeted putaway task exists, is open, and belongs to this warehouse tenant boundary.
-        // NOTE: shipment_id is now also selected so we can locate the matching row in the new
-        // `transactions` master registry once putaway is finalized.
         const originalTask = await env.DB.prepare(
           "SELECT id, shipment_id FROM putaway_tasks WHERE id = ? AND warehouse_id = ? AND status = 'pending'",
         )
@@ -1760,20 +1742,16 @@ export default {
           );
         }
 
-        // 2. Grab the original expected inventory numbers to double-check quantities.
-        // NEW: expiry_date is also selected so it can be copied onto the inventory row
-        // created below for each item code (per commit-required flow-through).
+        // Capture complete transactional context variables from parent task items
         const originalItems = await env.DB.prepare(
-          "SELECT item_code, quantity_to_place, category, manufacturing_date, expiry_date FROM putaway_task_items WHERE putaway_task_id = ?",
+          "SELECT item_code, quantity_to_place, category, manufacturing_date, expiry_date, shipment_line_item_id, uom FROM putaway_task_items WHERE putaway_task_id = ?",
         )
           .bind(putaway_task_id)
           .all();
 
-        // Calculate expected quantities per SKU item code
         const expectedTotals = {};
-        // Map item_code -> batch metadata from putaway task items so allocations
-        // (which don't carry these fields themselves) can look them up.
         const batchMetaByItemCode = {};
+
         for (const targetItem of originalItems.results) {
           expectedTotals[targetItem.item_code] =
             (expectedTotals[targetItem.item_code] || 0) +
@@ -1783,11 +1761,12 @@ export default {
               category: targetItem.category ?? null,
               manufacturing_date: targetItem.manufacturing_date ?? null,
               expiry_date: targetItem.expiry_date ?? null,
+              shipment_line_item_id: targetItem.shipment_line_item_id,
+              uom: targetItem.uom,
             };
           }
         }
 
-        // Calculate actual sum values from the operator's submission payload splits
         const submittedTotals = {};
         for (const alloc of allocations) {
           const qty =
@@ -1797,7 +1776,6 @@ export default {
             (submittedTotals[alloc.item_code] || 0) + qty;
         }
 
-        // Server-side verification constraint check: Totals must align perfectly
         for (const code of Object.keys(expectedTotals)) {
           const expected = expectedTotals[code];
           const submitted = submittedTotals[code] || 0;
@@ -1813,7 +1791,6 @@ export default {
 
         const batchStatements = [];
 
-        // 3. Loop through individual allocations to build atomic queries
         for (const alloc of allocations) {
           const targetLocationId = String(alloc.location_id || "")
             .trim()
@@ -1827,7 +1804,6 @@ export default {
 
           if (targetQty <= 0 || !targetLocationId) continue;
 
-          // Target verification query block to make sure the operator didn't type an uninitialized shelf label
           const validLocation = await env.DB.prepare(
             "SELECT id FROM locations WHERE id = ? AND warehouse_id = ?",
           )
@@ -1843,58 +1819,43 @@ export default {
             );
           }
 
-          // NOTE: The old per-allocation `inventory_transactions` audit insert has been removed.
-          // The `inventory_transactions` table no longer exists — per-movement history is not
-          // recreated. The single business transaction row for this shipment (created at commit
-          // time) is updated to "completed" once, below, after all allocations are processed.
-
           const itemBatchMeta = batchMetaByItemCode[cleanItemCode] || {};
-          const allocExpiryDate = itemBatchMeta.expiry_date ?? null;
 
-          // Upsert live balances snapshot indexes.
-          // NEW: conflict target now includes expiry_key (a generated column
-          // that maps NULL expiry -> ''), so a batch with a different expiry
-          // date (or no expiry vs. a real one) lands in its own row instead
-          // of silently merging into an existing batch's row.
+          // Completely removed standard UPSERT / ON CONFLICT configurations.
+          // Every physical allocation strictly writes a standalone, separate data row record.
           batchStatements.push(
             env.DB.prepare(
-              `INSERT INTO inventory (id, warehouse_id, location_id, item_code, item_description, quantity, expiry_date)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(warehouse_id, location_id, item_code, expiry_key) 
-               DO UPDATE SET quantity = quantity + excluded.quantity`,
+              `INSERT INTO inventory (
+            id, shipment_line_item_id, warehouse_id, location_id, item_code, 
+            item_description, quantity, uom, category, manufacturing_date, expiry_date
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ).bind(
               "inv_" + crypto.randomUUID(),
+              itemBatchMeta.shipment_line_item_id,
               auth.context.warehouse_id,
               targetLocationId,
               cleanItemCode,
               cleanItemDesc,
               targetQty,
-              allocExpiryDate,
+              itemBatchMeta.uom || "PCS",
+              itemBatchMeta.category,
+              itemBatchMeta.manufacturing_date,
+              itemBatchMeta.expiry_date,
             ),
           );
         }
 
-        // 4. Mark task row instance state complete
         batchStatements.push(
           env.DB.prepare(
             "UPDATE putaway_tasks SET status = 'completed' WHERE id = ? AND warehouse_id = ?",
           ).bind(putaway_task_id, auth.context.warehouse_id),
         );
 
-        // 5. NEW: Flip the existing master transaction row for this shipment to "completed".
-        // This does NOT create a new row — it locates the single inbound transaction registered
-        // at commit time (transaction_type = 'inbound', reference_id = shipment_id) and updates it.
         batchStatements.push(
           env.DB.prepare(
-            `
-            UPDATE transactions
-            SET status = 'completed',
-                completed_by_user_id = ?,
-                completed_at = CURRENT_TIMESTAMP
-            WHERE transaction_type = 'inbound'
-              AND reference_id = ?
-              AND warehouse_id = ?
-            `,
+            `UPDATE transactions
+        SET status = 'completed', completed_by_user_id = ?, completed_at = CURRENT_TIMESTAMP
+        WHERE transaction_type = 'inbound' AND reference_id = ? AND warehouse_id = ?`,
           ).bind(
             auth.context.user_id,
             originalTask.shipment_id,
@@ -1902,7 +1863,6 @@ export default {
           ),
         );
 
-        // Execute transaction batch run
         await env.DB.batch(batchStatements);
 
         return new Response(
@@ -1944,15 +1904,13 @@ export default {
       }
 
       try {
-        // Fetch all active physical stocks matching this corporate tenant.
-        // NEW: expiry_date is now selected so each distinct batch row
-        // (item_code can now appear more than once per location if batches
-        // have different expiry dates) is distinguishable to the client.
+        // Select all raw data keys required for granular validation tracing
         const inventoryBalances = await env.DB.prepare(
-          `SELECT id, location_id, item_code, item_description, quantity, expiry_date 
-           FROM inventory 
-           WHERE warehouse_id = ? AND quantity > 0
-           ORDER BY location_id ASC, item_code ASC, expiry_date ASC`,
+          `SELECT id, shipment_line_item_id, warehouse_id, location_id, item_code, 
+              item_description, quantity, uom, category, manufacturing_date, expiry_date, created_at 
+       FROM inventory 
+       WHERE warehouse_id = ? AND quantity > 0
+       ORDER BY location_id ASC, item_code ASC, created_at DESC`,
         )
           .bind(auth.context.warehouse_id)
           .all();

@@ -2,16 +2,15 @@ DROP TABLE IF EXISTS inventory;
 
 CREATE TABLE inventory (
     id TEXT PRIMARY KEY,
+    shipment_line_item_id TEXT NOT NULL,
     warehouse_id TEXT NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
     location_id TEXT NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
     item_code TEXT NOT NULL,
-    item_description TEXT,
+    item_description TEXT NOT NULL,
     quantity REAL NOT NULL,
+    uom TEXT NOT NULL,
+    category TEXT NOT NULL,
+    manufacturing_date TEXT,
     expiry_date TEXT,
-    -- Generated column: maps NULL expiry_date -> '' so that two "no expiry"
-    -- batches of the same item/location still collide (and merge) under the
-    -- UNIQUE constraint below, while two different real expiry dates (or a
-    -- null vs. a real date) are treated as distinct batches with separate rows.
-    expiry_key TEXT GENERATED ALWAYS AS (COALESCE(expiry_date, '')) STORED,
-    UNIQUE(warehouse_id, location_id, item_code, expiry_key)
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
