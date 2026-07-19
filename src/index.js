@@ -1742,9 +1742,9 @@ export default {
           );
         }
 
-        // Capture complete transactional context variables from parent task items
+        // MODIFIED: Included 'id' in SELECT fields to map putaway_task_item traceability
         const originalItems = await env.DB.prepare(
-          "SELECT item_code, quantity_to_place, category, manufacturing_date, expiry_date, shipment_line_item_id, uom FROM putaway_task_items WHERE putaway_task_id = ?",
+          "SELECT id, item_code, quantity_to_place, category, manufacturing_date, expiry_date, shipment_line_item_id, uom FROM putaway_task_items WHERE putaway_task_id = ?",
         )
           .bind(putaway_task_id)
           .all();
@@ -1758,6 +1758,7 @@ export default {
             targetItem.quantity_to_place;
           if (!(targetItem.item_code in batchMetaByItemCode)) {
             batchMetaByItemCode[targetItem.item_code] = {
+              putaway_task_item_id: targetItem.id, // Captured the Putaway Task Item ID
               category: targetItem.category ?? null,
               manufacturing_date: targetItem.manufacturing_date ?? null,
               expiry_date: targetItem.expiry_date ?? null,
@@ -1821,17 +1822,17 @@ export default {
 
           const itemBatchMeta = batchMetaByItemCode[cleanItemCode] || {};
 
-          // Completely removed standard UPSERT / ON CONFLICT configurations.
-          // Every physical allocation strictly writes a standalone, separate data row record.
+          // MODIFIED: Added putaway_task_item_id column insertion mapping
           batchStatements.push(
             env.DB.prepare(
               `INSERT INTO inventory (
-            id, shipment_line_item_id, warehouse_id, location_id, item_code, 
+            id, shipment_line_item_id, putaway_task_item_id, warehouse_id, location_id, item_code, 
             item_description, quantity, uom, category, manufacturing_date, expiry_date
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ).bind(
               "inv_" + crypto.randomUUID(),
               itemBatchMeta.shipment_line_item_id,
+              itemBatchMeta.putaway_task_item_id, // Bound putaway task item ID
               auth.context.warehouse_id,
               targetLocationId,
               cleanItemCode,
@@ -1845,10 +1846,15 @@ export default {
           );
         }
 
+        // MODIFIED: Appended completed_by_user_id context update to the target task
         batchStatements.push(
           env.DB.prepare(
-            "UPDATE putaway_tasks SET status = 'completed' WHERE id = ? AND warehouse_id = ?",
-          ).bind(putaway_task_id, auth.context.warehouse_id),
+            "UPDATE putaway_tasks SET status = 'completed', completed_by_user_id = ? WHERE id = ? AND warehouse_id = ?",
+          ).bind(
+            auth.context.user_id,
+            putaway_task_id,
+            auth.context.warehouse_id,
+          ),
         );
 
         batchStatements.push(
@@ -1904,13 +1910,33 @@ export default {
       }
 
       try {
-        // Select all raw data keys required for granular validation tracing
+        // MODIFIED: Configured LEFT JOINs to resolve verified_by and putaway_by names dynamically
         const inventoryBalances = await env.DB.prepare(
-          `SELECT id, shipment_line_item_id, warehouse_id, location_id, item_code, 
-              item_description, quantity, uom, category, manufacturing_date, expiry_date, created_at 
-       FROM inventory 
-       WHERE warehouse_id = ? AND quantity > 0
-       ORDER BY location_id ASC, item_code ASC, created_at DESC`,
+          `SELECT 
+              i.id, 
+              i.shipment_line_item_id, 
+              i.putaway_task_item_id,
+              i.warehouse_id, 
+              i.location_id, 
+              i.item_code, 
+              i.item_description, 
+              i.quantity, 
+              i.uom, 
+              i.category, 
+              i.manufacturing_date, 
+              i.expiry_date, 
+              i.created_at,
+              u_verified.username AS verified_by,
+              u_putaway.username AS putaway_by
+           FROM inventory i
+           LEFT JOIN shipment_line_items sli ON i.shipment_line_item_id = sli.id
+           LEFT JOIN shipment_details sd ON sli.shipment_id = sd.id
+           LEFT JOIN users u_verified ON sd.verified_by_user_id = u_verified.id
+           LEFT JOIN putaway_task_items pti ON i.putaway_task_item_id = pti.id
+           LEFT JOIN putaway_tasks pt ON pti.putaway_task_id = pt.id
+           LEFT JOIN users u_putaway ON pt.completed_by_user_id = u_putaway.id
+           WHERE i.warehouse_id = ? AND i.quantity > 0
+           ORDER BY i.location_id ASC, i.item_code ASC, i.created_at DESC`,
         )
           .bind(auth.context.warehouse_id)
           .all();
