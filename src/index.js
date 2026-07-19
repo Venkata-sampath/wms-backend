@@ -1634,10 +1634,12 @@ export default {
       }
 
       try {
+        // MODIFIED: Joined users table to fetch verified_by and removed vehicle_number
         const tasksQuery = await env.DB.prepare(
-          `SELECT t.id, t.shipment_id, t.created_at, d.invoice_number, d.vehicle_number 
+          `SELECT t.id, t.shipment_id, t.created_at, d.invoice_number, u.username AS verified_by
        FROM putaway_tasks t
        LEFT JOIN shipment_details d ON t.shipment_id = d.id
+       LEFT JOIN users u ON d.verified_by_user_id = u.id
        WHERE t.warehouse_id = ? AND t.status = 'pending'
        ORDER BY t.created_at DESC`,
         )
@@ -1656,7 +1658,6 @@ export default {
         const taskIds = pendingTasks.map((t) => t.id);
         const placeholders = taskIds.map(() => "?").join(",");
 
-        // Appended shipment_line_item_id and uom fields
         const itemsQuery = await env.DB.prepare(
           `SELECT putaway_task_id, id, item_code, item_description, quantity_to_place, category, manufacturing_date, expiry_date, shipment_line_item_id, uom
        FROM putaway_task_items 
@@ -1671,6 +1672,109 @@ export default {
           return {
             ...task,
             items: allItems.filter((item) => item.putaway_task_id === task.id),
+          };
+        });
+
+        return new Response(JSON.stringify({ tasks: responseData }), {
+          status: 200,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+    }
+
+    // =========================================================================
+    // ENDPOINT: Get Completed Putaway Tasks with Item Lists & Allocations (SECURED)
+    // =========================================================================
+    if (request.method === "GET" && url.pathname === "/api/putaway/completed") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+
+      if (auth.context.role === "super_admin") {
+        return new Response(JSON.stringify({ error: "Access Denied" }), {
+          status: 403,
+          headers: corsHeaders,
+        });
+      }
+
+      try {
+        // Fetches archived completed tasks alongside resolved user identities and execution timestamps
+        const tasksQuery = await env.DB.prepare(
+          `SELECT t.id, t.shipment_id, t.created_at, d.invoice_number, 
+                  u1.username AS verified_by, u2.username AS completed_by, tx.completed_at AS completed_date_time
+           FROM putaway_tasks t
+           LEFT JOIN shipment_details d ON t.shipment_id = d.id
+           LEFT JOIN users u1 ON d.verified_by_user_id = u1.id
+           LEFT JOIN users u2 ON t.completed_by_user_id = u2.id
+           LEFT JOIN transactions tx ON tx.transaction_type = 'inbound' AND tx.reference_id = t.shipment_id AND tx.warehouse_id = t.warehouse_id
+           WHERE t.warehouse_id = ? AND t.status = 'completed'
+           ORDER BY tx.completed_at DESC`,
+        )
+          .bind(auth.context.warehouse_id)
+          .all();
+
+        const completedTasks = tasksQuery.results;
+
+        if (completedTasks.length === 0) {
+          return new Response(JSON.stringify({ tasks: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json", ...corsHeaders },
+          });
+        }
+
+        const taskIds = completedTasks.map((t) => t.id);
+        const placeholders = taskIds.map(() => "?").join(",");
+
+        const itemsQuery = await env.DB.prepare(
+          `SELECT putaway_task_id, id, item_code, item_description, quantity_to_place, category, manufacturing_date, expiry_date, shipment_line_item_id, uom
+           FROM putaway_task_items 
+           WHERE putaway_task_id IN (${placeholders})`,
+        )
+          .bind(...taskIds)
+          .all();
+
+        const allItems = itemsQuery.results;
+        const itemIds = allItems.map((i) => i.id);
+
+        let allAllocations = [];
+        if (itemIds.length > 0) {
+          const itemPlaceholders = itemIds.map(() => "?").join(",");
+          const allocQuery = await env.DB.prepare(
+            `SELECT putaway_task_item_id, location_id, quantity 
+             FROM putaway_task_item_allocations 
+             WHERE putaway_task_item_id IN (${itemPlaceholders})`,
+          )
+            .bind(...itemIds)
+            .all();
+          allAllocations = allocQuery.results;
+        }
+
+        const responseData = completedTasks.map((task) => {
+          const taskItems = allItems
+            .filter((item) => item.putaway_task_id === task.id)
+            .map((item) => {
+              return {
+                ...item,
+                allocations: allAllocations
+                  .filter((a) => a.putaway_task_item_id === item.id)
+                  .map((a) => ({
+                    location_id: a.location_id,
+                    quantity: a.quantity,
+                  })),
+              };
+            });
+          return {
+            ...task,
+            items: taskItems,
           };
         });
 
@@ -1742,7 +1846,6 @@ export default {
           );
         }
 
-        // MODIFIED: Included 'id' in SELECT fields to map putaway_task_item traceability
         const originalItems = await env.DB.prepare(
           "SELECT id, item_code, quantity_to_place, category, manufacturing_date, expiry_date, shipment_line_item_id, uom FROM putaway_task_items WHERE putaway_task_id = ?",
         )
@@ -1758,7 +1861,7 @@ export default {
             targetItem.quantity_to_place;
           if (!(targetItem.item_code in batchMetaByItemCode)) {
             batchMetaByItemCode[targetItem.item_code] = {
-              putaway_task_item_id: targetItem.id, // Captured the Putaway Task Item ID
+              putaway_task_item_id: targetItem.id,
               category: targetItem.category ?? null,
               manufacturing_date: targetItem.manufacturing_date ?? null,
               expiry_date: targetItem.expiry_date ?? null,
@@ -1822,7 +1925,7 @@ export default {
 
           const itemBatchMeta = batchMetaByItemCode[cleanItemCode] || {};
 
-          // MODIFIED: Added putaway_task_item_id column insertion mapping
+          // Inventory execution record
           batchStatements.push(
             env.DB.prepare(
               `INSERT INTO inventory (
@@ -1832,7 +1935,7 @@ export default {
             ).bind(
               "inv_" + crypto.randomUUID(),
               itemBatchMeta.shipment_line_item_id,
-              itemBatchMeta.putaway_task_item_id, // Bound putaway task item ID
+              itemBatchMeta.putaway_task_item_id,
               auth.context.warehouse_id,
               targetLocationId,
               cleanItemCode,
@@ -1844,9 +1947,23 @@ export default {
               itemBatchMeta.expiry_date,
             ),
           );
+
+          // NEW: Allocation persistence mapping step
+          batchStatements.push(
+            env.DB.prepare(
+              `INSERT INTO putaway_task_item_allocations (
+            id, warehouse_id, putaway_task_item_id, location_id, quantity
+          ) VALUES (?, ?, ?, ?, ?)`,
+            ).bind(
+              "alloc_" + crypto.randomUUID(),
+              auth.context.warehouse_id,
+              itemBatchMeta.putaway_task_item_id,
+              targetLocationId,
+              targetQty,
+            ),
+          );
         }
 
-        // MODIFIED: Appended completed_by_user_id context update to the target task
         batchStatements.push(
           env.DB.prepare(
             "UPDATE putaway_tasks SET status = 'completed', completed_by_user_id = ? WHERE id = ? AND warehouse_id = ?",
