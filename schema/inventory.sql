@@ -3,7 +3,7 @@ DROP TABLE IF EXISTS inventory;
 CREATE TABLE inventory (
     id TEXT PRIMARY KEY,
     shipment_line_item_id TEXT NOT NULL REFERENCES shipment_line_items(id) ON DELETE CASCADE,
-    putaway_task_item_id TEXT REFERENCES putaway_task_items(id) ON DELETE SET NULL, -- Added Nullable FK
+    putaway_task_item_id TEXT NOT NULL REFERENCES putaway_task_items(id) ON DELETE CASCADE,
     warehouse_id TEXT NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
     location_id TEXT NOT NULL, 
     item_code TEXT NOT NULL,
