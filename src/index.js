@@ -1109,7 +1109,40 @@ export default {
 
       try {
         const payload = await request.json();
-        const { shipmentId, header, parties, lineItems } = payload;
+        const { shipmentId, client_id, header, parties, lineItems } = payload;
+
+        if (!client_id) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "Relational failure: A valid Client reference ID must accompany the verification packet.",
+            }),
+            {
+              status: 400,
+              headers: corsHeaders,
+            },
+          );
+        }
+
+        // Security Check: Verify that client context exists and belongs to this warehouse tenant
+        const clientVerification = await env.DB.prepare(
+          "SELECT id FROM clients WHERE id = ? AND warehouse_id = ?",
+        )
+          .bind(client_id, auth.context.warehouse_id)
+          .first();
+
+        if (!clientVerification) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "Verification rejected: Selected Client context record mismatch or invalid assignment.",
+            }),
+            {
+              status: 403,
+              headers: corsHeaders,
+            },
+          );
+        }
 
         // Security Check: Verify staging record ownership
         const stagingVerification = await env.DB.prepare(
@@ -1139,7 +1172,6 @@ export default {
           }
 
           const cleanGstin = String(party.gstin).trim().toUpperCase();
-
           if (cleanGstin.length !== 15) {
             return new Response(
               JSON.stringify({
@@ -1233,12 +1265,13 @@ export default {
           ).bind(shipmentId, auth.context.warehouse_id),
         );
 
+        // Write shipment_details + client_id
         batchStatements.push(
           env.DB.prepare(
             `INSERT INTO shipment_details (
           id, invoice_number, invoice_date, po_number, lr_number, e_way_bill_number, vehicle_number, driver_name, driver_phone_number,
-          seller_party_id, bill_to_party_id, ship_to_party_id, additional_data, warehouse_id, verified_by_user_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          seller_party_id, bill_to_party_id, ship_to_party_id, additional_data, warehouse_id, verified_by_user_id, client_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             shipmentId,
             String(header.invoice_number || "").trim(),
@@ -1257,14 +1290,21 @@ export default {
               : null,
             auth.context.warehouse_id,
             auth.context.user_id,
+            client_id,
           ),
         );
 
+        // Create putaway_tasks + client_id
         const putawayTaskId = "ptk_" + crypto.randomUUID();
         batchStatements.push(
           env.DB.prepare(
-            "INSERT INTO putaway_tasks (id, warehouse_id, shipment_id, status) VALUES (?, ?, ?, 'pending')",
-          ).bind(putawayTaskId, auth.context.warehouse_id, shipmentId),
+            "INSERT INTO putaway_tasks (id, warehouse_id, shipment_id, status, client_id) VALUES (?, ?, ?, 'pending', ?)",
+          ).bind(
+            putawayTaskId,
+            auth.context.warehouse_id,
+            shipmentId,
+            client_id,
+          ),
         );
 
         if (Array.isArray(lineItems)) {
@@ -1274,19 +1314,16 @@ export default {
               item.manufacturing_date,
             );
             const resolvedExpiryDate = cleanDateField(item.expiry_date);
-
-            // Generate the exact shipment line item ID once
             const lineItemId = crypto.randomUUID();
             const verifiedUom = String(item.uom || "PCS").trim();
 
             batchStatements.push(
               env.DB.prepare(
                 `INSERT INTO shipment_line_items (
-              id, shipment_id, item_code, item_description, hsn_sac, 
-              ordered_quantity, uom, rate, gross_amount, discount_amount, taxable_amount, 
-              tax_rate_percent, cgst, sgst, igst, cess, total_amount,
-              category, received_quantity, damaged_quantity, shortage_quantity, excess_quantity, 
-              discrepancy_uom, discrepancy_notes, manufacturing_date, expiry_date
+              id, shipment_id, item_code, item_description, hsn_sac, ordered_quantity, uom, rate, gross_amount,
+              discount_amount, taxable_amount, tax_rate_percent, cgst, sgst, igst, cess, total_amount, category,
+              received_quantity, damaged_quantity, shortage_quantity, excess_quantity, discrepancy_uom, discrepancy_notes,
+              manufacturing_date, expiry_date
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               ).bind(
                 lineItemId,
@@ -1323,7 +1360,7 @@ export default {
               batchStatements.push(
                 env.DB.prepare(
                   `INSERT INTO putaway_task_items (id, putaway_task_id, item_code, item_description, quantity_to_place, category, expiry_date, manufacturing_date, shipment_line_item_id, uom)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 ).bind(
                   "pti_" + crypto.randomUUID(),
                   putawayTaskId,
@@ -1333,8 +1370,8 @@ export default {
                   resolvedCategory,
                   resolvedExpiryDate,
                   resolvedManufacturingDate,
-                  lineItemId, // Exact reference mapping
-                  verifiedUom, // Forwarded UOM metadata
+                  lineItemId,
+                  verifiedUom,
                 ),
               );
             }
@@ -1347,16 +1384,18 @@ export default {
           ).bind(shipmentId, auth.context.warehouse_id),
         );
 
+        // Create transactions + client_id
         const transactionId = "txn_" + crypto.randomUUID();
         batchStatements.push(
           env.DB.prepare(
-            `INSERT INTO transactions (id, warehouse_id, transaction_type, reference_id, status, created_by_user_id, completed_by_user_id, completed_at, remarks)
-        VALUES (?, ?, 'inbound', ?, 'pending_putaway', ?, NULL, NULL, NULL)`,
+            `INSERT INTO transactions (id, warehouse_id, transaction_type, reference_id, status, created_by_user_id, completed_by_user_id, completed_at, remarks, client_id)
+         VALUES (?, ?, 'inbound', ?, 'pending_putaway', ?, NULL, NULL, NULL, ?)`,
           ).bind(
             transactionId,
             auth.context.warehouse_id,
             shipmentId,
             auth.context.user_id,
+            client_id,
           ),
         );
 
@@ -1830,8 +1869,9 @@ export default {
           );
         }
 
+        // Capture client_id from the original pending task payload
         const originalTask = await env.DB.prepare(
-          "SELECT id, shipment_id FROM putaway_tasks WHERE id = ? AND warehouse_id = ? AND status = 'pending'",
+          "SELECT id, shipment_id, client_id FROM putaway_tasks WHERE id = ? AND warehouse_id = ? AND status = 'pending'",
         )
           .bind(putaway_task_id, auth.context.warehouse_id)
           .first();
@@ -1925,13 +1965,13 @@ export default {
 
           const itemBatchMeta = batchMetaByItemCode[cleanItemCode] || {};
 
-          // Inventory execution record
+          // Inventory record insertion with passed client_id field context mapping
           batchStatements.push(
             env.DB.prepare(
               `INSERT INTO inventory (
             id, shipment_line_item_id, putaway_task_item_id, warehouse_id, location_id, item_code, 
-            item_description, quantity, uom, category, manufacturing_date, expiry_date
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            item_description, quantity, uom, category, manufacturing_date, expiry_date, client_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ).bind(
               "inv_" + crypto.randomUUID(),
               itemBatchMeta.shipment_line_item_id,
@@ -1945,15 +1985,14 @@ export default {
               itemBatchMeta.category,
               itemBatchMeta.manufacturing_date,
               itemBatchMeta.expiry_date,
+              originalTask.client_id,
             ),
           );
 
-          // NEW: Allocation persistence mapping step
           batchStatements.push(
             env.DB.prepare(
-              `INSERT INTO putaway_task_item_allocations (
-            id, warehouse_id, putaway_task_item_id, location_id, quantity
-          ) VALUES (?, ?, ?, ?, ?)`,
+              `INSERT INTO putaway_task_item_allocations (id, warehouse_id, putaway_task_item_id, location_id, quantity)
+           VALUES (?, ?, ?, ?, ?)`,
             ).bind(
               "alloc_" + crypto.randomUUID(),
               auth.context.warehouse_id,
@@ -1976,9 +2015,8 @@ export default {
 
         batchStatements.push(
           env.DB.prepare(
-            `UPDATE transactions
-        SET status = 'completed', completed_by_user_id = ?, completed_at = CURRENT_TIMESTAMP
-        WHERE transaction_type = 'inbound' AND reference_id = ? AND warehouse_id = ?`,
+            `UPDATE transactions SET status = 'completed', completed_by_user_id = ?, completed_at = CURRENT_TIMESTAMP
+         WHERE transaction_type = 'inbound' AND reference_id = ? AND warehouse_id = ?`,
           ).bind(
             auth.context.user_id,
             originalTask.shipment_id,
@@ -2008,7 +2046,7 @@ export default {
     }
 
     // =========================================================================
-    // ENDPOINT: Get Current Live Inventory Snapshot (SECURED)
+    // GET /api/inventory -> Select statement updated to include i.client_id
     // =========================================================================
     if (request.method === "GET" && url.pathname === "/api/inventory") {
       const auth = await getTenantContext(request, env);
@@ -2027,33 +2065,22 @@ export default {
       }
 
       try {
-        // MODIFIED: Configured LEFT JOINs to resolve verified_by and putaway_by names dynamically
         const inventoryBalances = await env.DB.prepare(
           `SELECT 
-              i.id, 
-              i.shipment_line_item_id, 
-              i.putaway_task_item_id,
-              i.warehouse_id, 
-              i.location_id, 
-              i.item_code, 
-              i.item_description, 
-              i.quantity, 
-              i.uom, 
-              i.category, 
-              i.manufacturing_date, 
-              i.expiry_date, 
-              i.created_at,
-              u_verified.username AS verified_by,
-              u_putaway.username AS putaway_by
-           FROM inventory i
-           LEFT JOIN shipment_line_items sli ON i.shipment_line_item_id = sli.id
-           LEFT JOIN shipment_details sd ON sli.shipment_id = sd.id
-           LEFT JOIN users u_verified ON sd.verified_by_user_id = u_verified.id
-           LEFT JOIN putaway_task_items pti ON i.putaway_task_item_id = pti.id
-           LEFT JOIN putaway_tasks pt ON pti.putaway_task_id = pt.id
-           LEFT JOIN users u_putaway ON pt.completed_by_user_id = u_putaway.id
-           WHERE i.warehouse_id = ? AND i.quantity > 0
-           ORDER BY i.location_id ASC, i.item_code ASC, i.created_at DESC`,
+          i.id, i.shipment_line_item_id, i.putaway_task_item_id, i.warehouse_id, i.location_id, 
+          i.item_code, i.item_description, i.quantity, i.uom, i.category, i.manufacturing_date, 
+          i.expiry_date, i.created_at, i.client_id, c.name AS client_name, u_verified.username AS verified_by,
+          u_putaway.username AS putaway_by
+       FROM inventory i
+       LEFT JOIN clients c ON i.client_id = c.id
+       LEFT JOIN shipment_line_items sli ON i.shipment_line_item_id = sli.id
+       LEFT JOIN shipment_details sd ON sli.shipment_id = sd.id
+       LEFT JOIN users u_verified ON sd.verified_by_user_id = u_verified.id
+       LEFT JOIN putaway_task_items pti ON i.putaway_task_item_id = pti.id
+       LEFT JOIN putaway_tasks pt ON pti.putaway_task_id = pt.id
+       LEFT JOIN users u_putaway ON pt.completed_by_user_id = u_putaway.id
+       WHERE i.warehouse_id = ? AND i.quantity > 0
+       ORDER BY i.location_id ASC, i.item_code ASC, i.created_at DESC`,
         )
           .bind(auth.context.warehouse_id)
           .all();
@@ -2073,16 +2100,173 @@ export default {
       }
     }
 
-    // ---------------------------------------------------------------------------
-    // GET /api/transactions
-    //
-    // Replaces the old inventory-movement ledger. Returns ONE ROW PER BUSINESS
-    // TRANSACTION (one per shipment for inbound), never one row per line item.
-    //
-    // Only inbound transactions exist today, so the join to shipment_details is
-    // hardcoded here. See the note below on how to extend this for outbound /
-    // transfer / returns once those module tables exist.
-    // ---------------------------------------------------------------------------
+    // =========================================================================
+    // GET /api/clients -> Fetch isolate tenant clients records
+    // =========================================================================
+    if (request.method === "GET" && url.pathname === "/api/clients") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+
+      if (auth.context.role === "super_admin") {
+        return new Response(
+          JSON.stringify({
+            error:
+              "Access Denied: Super Admins lack workspace client assignments.",
+          }),
+          {
+            status: 403,
+            headers: corsHeaders,
+          },
+        );
+      }
+
+      try {
+        const clientsRows = await env.DB.prepare(
+          "SELECT * FROM clients WHERE warehouse_id = ? ORDER BY name ASC",
+        )
+          .bind(auth.context.warehouse_id)
+          .all();
+
+        return new Response(JSON.stringify({ clients: clientsRows.results }), {
+          status: 200,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+    }
+
+    // =========================================================================
+    // POST /api/clients -> Admin-gated Client Identity Provisioner
+    // =========================================================================
+    if (request.method === "POST" && url.pathname === "/api/clients") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+
+      // Strict Role Enforcement Check
+      if (auth.context.role !== "admin") {
+        return new Response(
+          JSON.stringify({
+            error:
+              "Operation Forbidden: Provisioning client identities requires Administrator rights.",
+          }),
+          { status: 403, headers: corsHeaders },
+        );
+      }
+
+      try {
+        const payload = await request.json();
+        const name = String(payload.name || "").trim();
+        const code = String(payload.code || "")
+          .trim()
+          .toUpperCase();
+        const gstin = payload.gstin
+          ? String(payload.gstin).trim().toUpperCase()
+          : null;
+        const contactPerson = payload.contact_person
+          ? String(payload.contact_person).trim()
+          : null;
+        const phone = payload.phone ? String(payload.phone).trim() : null;
+        const email = payload.email ? String(payload.email).trim() : null;
+
+        // Server-side Param validations
+        if (!name || !code) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "Missing required values: Client Name and Code are mandatory fields.",
+            }),
+            {
+              status: 400,
+              headers: corsHeaders,
+            },
+          );
+        }
+
+        if (gstin && gstin.length !== 15) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "Invalid GSTIN payload: Must be exactly 15 alphanumeric characters long.",
+            }),
+            {
+              status: 400,
+              headers: corsHeaders,
+            },
+          );
+        }
+
+        // Verify Unique Code Constraint within specific Warehouse Domain
+        const existingCode = await env.DB.prepare(
+          "SELECT id FROM clients WHERE warehouse_id = ? AND code = ?",
+        )
+          .bind(auth.context.warehouse_id, code)
+          .first();
+
+        if (existingCode) {
+          return new Response(
+            JSON.stringify({
+              error: `Naming conflict: Client code '${code}' is already actively deployed inside this warehouse footprint.`,
+            }),
+            { status: 409, headers: corsHeaders },
+          );
+        }
+
+        const newClientId = "cli_" + crypto.randomUUID();
+
+        await env.DB.prepare(
+          `INSERT INTO clients (
+        id, warehouse_id, name, code, gstin, contact_person, phone, email, status, created_by_user_id, updated_by_user_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL)`,
+        )
+          .bind(
+            newClientId,
+            auth.context.warehouse_id,
+            name,
+            code,
+            gstin,
+            contactPerson,
+            phone,
+            email,
+            auth.context.user_id,
+          )
+          .run();
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            message: "Client master identity mapped successfully.",
+            client_id: newClientId,
+          }),
+          {
+            status: 201,
+            headers: { "Content-Type": "application/json", ...corsHeaders },
+          },
+        );
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+    }
+
+    // =========================================================================
+    // GET /api/transactions -> Includes t.client_id lookup mapping bindings
+    // =========================================================================
     if (request.method === "GET" && url.pathname === "/api/transactions") {
       const auth = await getTenantContext(request, env);
       if (!auth.success) {
@@ -2100,29 +2284,17 @@ export default {
       }
 
       try {
-        // Today only "inbound" transactions exist, so we join straight to
-        // shipment_details. When outbound/transfer/etc. are added, this
-        // becomes a UNION of one SELECT per transaction_type, each joining
-        // its own module's *_details table, still keyed by transactions.id.
         const registry = await env.DB.prepare(
           `SELECT
-             t.id AS transaction_id,
-             t.transaction_type,
-             t.status,
-             t.reference_id AS entity_id,
-             t.warehouse_id,
-             t.created_at,
-             t.completed_at,
-             sd.invoice_number,
-             sd.invoice_date,
-             sd.vehicle_number,
-             u.username AS verified_by
-           FROM transactions t
-           JOIN shipment_details sd ON sd.id = t.reference_id
-           LEFT JOIN users u ON u.id = sd.verified_by_user_id
-           WHERE t.warehouse_id = ?
-             AND t.transaction_type = 'inbound'
-           ORDER BY t.created_at DESC`,
+         t.id AS transaction_id, t.transaction_type, t.status, t.reference_id AS entity_id,
+         t.warehouse_id, t.created_at, t.completed_at, t.client_id, c.name AS client_name,
+         sd.invoice_number, sd.invoice_date, sd.vehicle_number, u.username AS verified_by
+       FROM transactions t
+       LEFT JOIN clients c ON t.client_id = c.id
+       JOIN shipment_details sd ON sd.id = t.reference_id
+       LEFT JOIN users u ON u.id = sd.verified_by_user_id
+       WHERE t.warehouse_id = ? AND t.transaction_type = 'inbound'
+       ORDER BY t.created_at DESC`,
         )
           .bind(auth.context.warehouse_id)
           .all();
@@ -2142,13 +2314,9 @@ export default {
       }
     }
 
-    // ---------------------------------------------------------------------------
-    // GET /api/transactions/:id
-    //
-    // Loads the full detail of a single business transaction. Dispatches on
-    // transaction_type so each module (inbound today, outbound/transfer/returns
-    // later) can plug in its own detail loader without touching this router.
-    // ---------------------------------------------------------------------------
+    // =========================================================================
+    // GET /api/transactions/:id -> Unified Transaction Details Selector Fetcher
+    // =========================================================================
     const transactionDetailMatch = url.pathname.match(
       /^\/api\/transactions\/([^/]+)$/,
     );
@@ -2164,7 +2332,10 @@ export default {
       try {
         const transactionId = transactionDetailMatch[1];
         const transaction = await env.DB.prepare(
-          "SELECT * FROM transactions WHERE id = ? AND warehouse_id = ?",
+          `SELECT t.*, c.name AS client_name, c.code AS client_code 
+       FROM transactions t 
+       LEFT JOIN clients c ON t.client_id = c.id 
+       WHERE t.id = ? AND t.warehouse_id = ?`,
         )
           .bind(transactionId, auth.context.warehouse_id)
           .first();
@@ -2187,10 +2358,8 @@ export default {
             )
               .bind(partyId, auth.context.warehouse_id)
               .first();
-
             return party || null;
           } catch (err) {
-            console.error(`Failed to resolve party ${partyId}:`, err);
             return null;
           }
         };
@@ -2198,9 +2367,10 @@ export default {
         const detailLoaders = {
           inbound: async () => {
             const shipment = await env.DB.prepare(
-              `SELECT sd.*, u.username AS verified_by
+              `SELECT sd.*, u.username AS verified_by, cl.name AS client_name, cl.code AS client_code
            FROM shipment_details sd
            LEFT JOIN users u ON u.id = sd.verified_by_user_id
+           LEFT JOIN clients cl ON sd.client_id = cl.id
            WHERE sd.id = ? AND sd.warehouse_id = ?`,
             )
               .bind(transaction.reference_id, auth.context.warehouse_id)
@@ -2234,12 +2404,14 @@ export default {
             JSON.stringify({
               error: `Unsupported transaction type: ${transaction.transaction_type}`,
             }),
-            { status: 400, headers: corsHeaders },
+            {
+              status: 400,
+              headers: corsHeaders,
+            },
           );
         }
 
         const moduleDetail = await loader();
-
         return new Response(JSON.stringify({ transaction, ...moduleDetail }), {
           status: 200,
           headers: { "Content-Type": "application/json", ...corsHeaders },

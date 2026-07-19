@@ -5,6 +5,7 @@ CREATE TABLE inventory (
     shipment_line_item_id TEXT NOT NULL REFERENCES shipment_line_items(id) ON DELETE CASCADE,
     putaway_task_item_id TEXT NOT NULL REFERENCES putaway_task_items(id) ON DELETE CASCADE,
     warehouse_id TEXT NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL REFERENCES clients(id),
     location_id TEXT NOT NULL, 
     item_code TEXT NOT NULL,
     item_description TEXT NOT NULL,

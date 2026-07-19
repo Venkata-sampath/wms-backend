@@ -4,6 +4,7 @@ CREATE TABLE transactions (
     id TEXT PRIMARY KEY,
     warehouse_id TEXT NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
     reference_id TEXT NOT NULL REFERENCES shipment_details(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL REFERENCES clients(id),
     transaction_type TEXT NOT NULL,
     status TEXT NOT NULL,
     created_by_user_id TEXT NOT NULL REFERENCES users(id),
