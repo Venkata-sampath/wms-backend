@@ -2069,20 +2069,20 @@ export default {
       try {
         const inventoryBalances = await env.DB.prepare(
           `SELECT 
-          i.id, i.shipment_line_item_id, i.putaway_task_item_id, i.warehouse_id, i.location_id, 
-          i.item_code, i.item_description, i.quantity, i.uom, i.category, i.manufacturing_date, 
-          i.expiry_date, i.created_at, i.client_id, c.name AS client_name, u_verified.username AS verified_by,
-          u_putaway.username AS putaway_by
-       FROM inventory i
-       LEFT JOIN clients c ON i.client_id = c.id
-       LEFT JOIN shipment_line_items sli ON i.shipment_line_item_id = sli.id
-       LEFT JOIN shipment_details sd ON sli.shipment_id = sd.id
-       LEFT JOIN users u_verified ON sd.verified_by_user_id = u_verified.id
-       LEFT JOIN putaway_task_items pti ON i.putaway_task_item_id = pti.id
-       LEFT JOIN putaway_tasks pt ON pti.putaway_task_id = pt.id
-       LEFT JOIN users u_putaway ON pt.completed_by_user_id = u_putaway.id
-       WHERE i.warehouse_id = ? AND i.quantity > 0
-       ORDER BY i.location_id ASC, i.item_code ASC, i.created_at DESC`,
+        i.id, i.shipment_line_item_id, i.putaway_task_item_id, i.warehouse_id, i.location_id, 
+        i.item_code, i.item_description, i.quantity, i.uom, i.category, i.manufacturing_date, 
+        i.expiry_date, i.created_at, i.client_id, c.name AS client_name, c.code AS client_code, 
+        u_verified.username AS verified_by, u_putaway.username AS putaway_by
+     FROM inventory i
+     LEFT JOIN clients c ON i.client_id = c.id
+     LEFT JOIN shipment_line_items sli ON i.shipment_line_item_id = sli.id
+     LEFT JOIN shipment_details sd ON sli.shipment_id = sd.id
+     LEFT JOIN users u_verified ON sd.verified_by_user_id = u_verified.id
+     LEFT JOIN putaway_task_items pti ON i.putaway_task_item_id = pti.id
+     LEFT JOIN putaway_tasks pt ON pti.putaway_task_id = pt.id
+     LEFT JOIN users u_putaway ON pt.completed_by_user_id = u_putaway.id
+     WHERE i.warehouse_id = ? AND i.quantity > 0
+     ORDER BY i.location_id ASC, i.item_code ASC, i.created_at DESC`,
         )
           .bind(auth.context.warehouse_id)
           .all();
