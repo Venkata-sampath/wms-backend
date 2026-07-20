@@ -1654,7 +1654,7 @@ export default {
     }
 
     // =========================================================================
-    // ENDPOINT: Get Pending Putaway Tasks with Item Lists (SECURED)
+    // GET /api/putaway/pending
     // =========================================================================
     if (request.method === "GET" && url.pathname === "/api/putaway/pending") {
       const auth = await getTenantContext(request, env);
@@ -1673,14 +1673,15 @@ export default {
       }
 
       try {
-        // MODIFIED: Joined users table to fetch verified_by and removed vehicle_number
+        // MODIFIED: Joined clients table to fetch client_code and client_name
         const tasksQuery = await env.DB.prepare(
-          `SELECT t.id, t.shipment_id, t.created_at, d.invoice_number, u.username AS verified_by
-       FROM putaway_tasks t
-       LEFT JOIN shipment_details d ON t.shipment_id = d.id
-       LEFT JOIN users u ON d.verified_by_user_id = u.id
-       WHERE t.warehouse_id = ? AND t.status = 'pending'
-       ORDER BY t.created_at DESC`,
+          `SELECT t.id, t.shipment_id, t.created_at, d.invoice_number, c.code AS client_code, c.name AS client_name, u.username AS verified_by
+           FROM putaway_tasks t
+           LEFT JOIN shipment_details d ON t.shipment_id = d.id
+           LEFT JOIN clients c ON d.client_id = c.id
+           LEFT JOIN users u ON d.verified_by_user_id = u.id
+           WHERE t.warehouse_id = ? AND t.status = 'pending'
+           ORDER BY t.created_at DESC`,
         )
           .bind(auth.context.warehouse_id)
           .all();
@@ -1699,8 +1700,8 @@ export default {
 
         const itemsQuery = await env.DB.prepare(
           `SELECT putaway_task_id, id, item_code, item_description, quantity_to_place, category, manufacturing_date, expiry_date, shipment_line_item_id, uom
-       FROM putaway_task_items 
-       WHERE putaway_task_id IN (${placeholders})`,
+           FROM putaway_task_items 
+           WHERE putaway_task_id IN (${placeholders})`,
         )
           .bind(...taskIds)
           .all();
@@ -1727,7 +1728,7 @@ export default {
     }
 
     // =========================================================================
-    // ENDPOINT: Get Completed Putaway Tasks with Item Lists & Allocations (SECURED)
+    // GET /api/putaway/completed
     // =========================================================================
     if (request.method === "GET" && url.pathname === "/api/putaway/completed") {
       const auth = await getTenantContext(request, env);
@@ -1746,12 +1747,13 @@ export default {
       }
 
       try {
-        // Fetches archived completed tasks alongside resolved user identities and execution timestamps
+        // MODIFIED: Joined clients table to fetch client_code and client_name
         const tasksQuery = await env.DB.prepare(
-          `SELECT t.id, t.shipment_id, t.created_at, d.invoice_number, 
+          `SELECT t.id, t.shipment_id, t.created_at, d.invoice_number, c.code AS client_code, c.name AS client_name,
                   u1.username AS verified_by, u2.username AS completed_by, tx.completed_at AS completed_date_time
            FROM putaway_tasks t
            LEFT JOIN shipment_details d ON t.shipment_id = d.id
+           LEFT JOIN clients c ON d.client_id = c.id
            LEFT JOIN users u1 ON d.verified_by_user_id = u1.id
            LEFT JOIN users u2 ON t.completed_by_user_id = u2.id
            LEFT JOIN transactions tx ON tx.transaction_type = 'inbound' AND tx.reference_id = t.shipment_id AND tx.warehouse_id = t.warehouse_id
@@ -2265,7 +2267,7 @@ export default {
     }
 
     // =========================================================================
-    // GET /api/transactions -> Includes t.client_id lookup mapping bindings
+    // GET /api/transactions
     // =========================================================================
     if (request.method === "GET" && url.pathname === "/api/transactions") {
       const auth = await getTenantContext(request, env);
@@ -2284,10 +2286,11 @@ export default {
       }
 
       try {
+        // MODIFIED: Selected c.code AS client_code
         const registry = await env.DB.prepare(
           `SELECT
          t.id AS transaction_id, t.transaction_type, t.status, t.reference_id AS entity_id,
-         t.warehouse_id, t.created_at, t.completed_at, t.client_id, c.name AS client_name,
+         t.warehouse_id, t.created_at, t.completed_at, t.client_id, c.name AS client_name, c.code AS client_code,
          sd.invoice_number, sd.invoice_date, sd.vehicle_number, u.username AS verified_by
        FROM transactions t
        LEFT JOIN clients c ON t.client_id = c.id
