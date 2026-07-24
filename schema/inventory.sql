@@ -2,8 +2,9 @@ DROP TABLE IF EXISTS inventory;
 
 CREATE TABLE inventory (
     id TEXT PRIMARY KEY,
-    shipment_line_item_id TEXT NOT NULL REFERENCES shipment_line_items(id) ON DELETE CASCADE,
-    putaway_task_item_id TEXT NOT NULL REFERENCES putaway_task_items(id) ON DELETE CASCADE,
+    inventory_source TEXT NOT NULL,
+    source_reference_id TEXT NOT NULL,
+    shipment_line_item_id TEXT REFERENCES shipment_line_items(id) ON DELETE CASCADE,
     warehouse_id TEXT NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
     client_id TEXT NOT NULL REFERENCES clients(id),
     location_id TEXT NOT NULL, 

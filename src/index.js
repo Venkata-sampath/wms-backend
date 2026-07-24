@@ -1903,7 +1903,7 @@ export default {
             targetItem.quantity_to_place;
           if (!(targetItem.item_code in batchMetaByItemCode)) {
             batchMetaByItemCode[targetItem.item_code] = {
-              putaway_task_item_id: targetItem.id,
+              source_reference_id: targetItem.id,
               category: targetItem.category ?? null,
               manufacturing_date: targetItem.manufacturing_date ?? null,
               expiry_date: targetItem.expiry_date ?? null,
@@ -1967,17 +1967,18 @@ export default {
 
           const itemBatchMeta = batchMetaByItemCode[cleanItemCode] || {};
 
-          // Inventory record insertion with passed client_id field context mapping
+          // Inventory record insertion updated for generic source tracking
           batchStatements.push(
             env.DB.prepare(
               `INSERT INTO inventory (
-            id, shipment_line_item_id, putaway_task_item_id, warehouse_id, location_id, item_code, 
+            id, shipment_line_item_id, inventory_source, source_reference_id, warehouse_id, location_id, item_code, 
             item_description, quantity, uom, category, manufacturing_date, expiry_date, client_id
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ).bind(
               "inv_" + crypto.randomUUID(),
               itemBatchMeta.shipment_line_item_id,
-              itemBatchMeta.putaway_task_item_id,
+              "putaway",
+              itemBatchMeta.source_reference_id,
               auth.context.warehouse_id,
               targetLocationId,
               cleanItemCode,
@@ -1998,7 +1999,7 @@ export default {
             ).bind(
               "alloc_" + crypto.randomUUID(),
               auth.context.warehouse_id,
-              itemBatchMeta.putaway_task_item_id,
+              itemBatchMeta.source_reference_id,
               targetLocationId,
               targetQty,
             ),
@@ -2069,7 +2070,7 @@ export default {
       try {
         const inventoryBalances = await env.DB.prepare(
           `SELECT 
-        i.id, i.shipment_line_item_id, i.putaway_task_item_id, i.warehouse_id, i.location_id, 
+        i.id, i.shipment_line_item_id, i.inventory_source, i.source_reference_id, i.warehouse_id, i.location_id, 
         i.item_code, i.item_description, i.quantity, i.uom, i.category, i.manufacturing_date, 
         i.expiry_date, i.created_at, i.client_id, c.name AS client_name, c.code AS client_code, 
         u_verified.username AS verified_by, u_putaway.username AS putaway_by
@@ -2078,7 +2079,7 @@ export default {
      LEFT JOIN shipment_line_items sli ON i.shipment_line_item_id = sli.id
      LEFT JOIN shipment_details sd ON sli.shipment_id = sd.id
      LEFT JOIN users u_verified ON sd.verified_by_user_id = u_verified.id
-     LEFT JOIN putaway_task_items pti ON i.putaway_task_item_id = pti.id
+     LEFT JOIN putaway_task_items pti ON i.source_reference_id = pti.id AND i.inventory_source = 'putaway'
      LEFT JOIN putaway_tasks pt ON pti.putaway_task_id = pt.id
      LEFT JOIN users u_putaway ON pt.completed_by_user_id = u_putaway.id
      WHERE i.warehouse_id = ? AND i.quantity > 0
