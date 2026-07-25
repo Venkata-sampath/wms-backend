@@ -2296,11 +2296,12 @@ export default {
     // =========================================================================
     if (request.method === "GET" && url.pathname === "/api/stock-owners") {
       const auth = await getTenantContext(request, env);
-      if (!auth.success)
+      if (!auth.success) {
         return new Response(JSON.stringify({ error: auth.error }), {
           status: auth.status,
           headers: corsHeaders,
         });
+      }
 
       try {
         const clientId = url.searchParams.get("client_id");
@@ -2322,6 +2323,7 @@ export default {
         const rows = await env.DB.prepare(query)
           .bind(...params)
           .all();
+
         return new Response(JSON.stringify({ stock_owners: rows.results }), {
           status: 200,
           headers: { "Content-Type": "application/json", ...corsHeaders },
@@ -2339,11 +2341,23 @@ export default {
     // =========================================================================
     if (request.method === "POST" && url.pathname === "/api/stock-owners") {
       const auth = await getTenantContext(request, env);
-      if (!auth.success)
+      if (!auth.success) {
         return new Response(JSON.stringify({ error: auth.error }), {
           status: auth.status,
           headers: corsHeaders,
         });
+      }
+
+      // Security Check: Enforce Admin privilege
+      if (auth.context.role !== "admin") {
+        return new Response(
+          JSON.stringify({
+            error:
+              "Operation Forbidden: Admin access required to create stock owners.",
+          }),
+          { status: 403, headers: corsHeaders },
+        );
+      }
 
       try {
         const payload = await request.json();
@@ -2370,7 +2384,7 @@ export default {
           );
         }
 
-        // Verify parent client exists in this warehouse
+        // Verify parent client exists in this warehouse tenant
         const clientExists = await env.DB.prepare(
           "SELECT id FROM clients WHERE id = ? AND warehouse_id = ?",
         )
@@ -2386,7 +2400,7 @@ export default {
           );
         }
 
-        // Code uniqueness check within warehouse
+        // Code uniqueness check within warehouse tenant
         const codeExists = await env.DB.prepare(
           "SELECT id FROM stock_owners WHERE warehouse_id = ? AND code = ?",
         )
@@ -2403,6 +2417,8 @@ export default {
         }
 
         const newOwnerId = "so_" + crypto.randomUUID();
+
+        // Exactly 11 columns <-> 11 values (10 '?' placeholders + 1 literal)
         await env.DB.prepare(
           `INSERT INTO stock_owners (id, client_id, warehouse_id, name, code, gstin, contact_person, phone, email, status, created_by_user_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
