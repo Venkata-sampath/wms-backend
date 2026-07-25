@@ -2239,9 +2239,10 @@ export default {
 
         // Atomic transaction: Provision Client and default Stock Owner concurrently
         await env.DB.batch([
+          // FIXED: Exactly 11 columns <-> 11 values (8 '?' + 'active' + 1 '?' + NULL)
           env.DB.prepare(
             `INSERT INTO clients (id, warehouse_id, name, code, gstin, contact_person, phone, email, status, created_by_user_id, updated_by_user_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL)`,
           ).bind(
             newClientId,
             auth.context.warehouse_id,
@@ -2254,9 +2255,10 @@ export default {
             auth.context.user_id,
           ),
 
+          // FIXED: Exactly 12 columns <-> 12 values (9 '?' + 'active' + 1 '?' + NULL)
           env.DB.prepare(
             `INSERT INTO stock_owners (id, client_id, warehouse_id, name, code, gstin, contact_person, phone, email, status, created_by_user_id, updated_by_user_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL)`,
           ).bind(
             defaultStockOwnerId,
             newClientId,
