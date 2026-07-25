@@ -2241,7 +2241,7 @@ export default {
         await env.DB.batch([
           env.DB.prepare(
             `INSERT INTO clients (id, warehouse_id, name, code, gstin, contact_person, phone, email, status, created_by_user_id, updated_by_user_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL)`,
           ).bind(
             newClientId,
             auth.context.warehouse_id,
