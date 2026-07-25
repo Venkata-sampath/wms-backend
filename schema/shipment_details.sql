@@ -2,7 +2,8 @@ DROP TABLE IF EXISTS shipment_details;
 
 CREATE TABLE shipment_details (
     id TEXT PRIMARY KEY REFERENCES inbound_shipments(id) ON DELETE CASCADE,
-    warehouse_id TEXT NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE, -- ISOLATION
+    warehouse_id TEXT NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
+    stock_owner_id TEXT NOT NULL REFERENCES stock_owners(id),
     verified_by_user_id TEXT NOT NULL REFERENCES users(id),      
     client_id TEXT NOT NULL REFERENCES clients(id),         
     invoice_number TEXT,      

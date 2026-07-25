@@ -1109,18 +1109,22 @@ export default {
 
       try {
         const payload = await request.json();
-        const { shipmentId, client_id, header, parties, lineItems } = payload;
+        const {
+          shipmentId,
+          client_id,
+          stock_owner_id,
+          header,
+          parties,
+          lineItems,
+        } = payload;
 
-        if (!client_id) {
+        if (!client_id || !stock_owner_id) {
           return new Response(
             JSON.stringify({
               error:
-                "Relational failure: A valid Client reference ID must accompany the verification packet.",
+                "Relational failure: Both Client ID and Stock Owner ID must accompany the verification packet.",
             }),
-            {
-              status: 400,
-              headers: corsHeaders,
-            },
+            { status: 400, headers: corsHeaders },
           );
         }
 
@@ -1137,10 +1141,24 @@ export default {
               error:
                 "Verification rejected: Selected Client context record mismatch or invalid assignment.",
             }),
-            {
-              status: 403,
-              headers: corsHeaders,
-            },
+            { status: 403, headers: corsHeaders },
+          );
+        }
+
+        // Security Check: Verify stock owner context exists, belongs to client, and belongs to warehouse
+        const stockOwnerVerification = await env.DB.prepare(
+          "SELECT id FROM stock_owners WHERE id = ? AND client_id = ? AND warehouse_id = ?",
+        )
+          .bind(stock_owner_id, client_id, auth.context.warehouse_id)
+          .first();
+
+        if (!stockOwnerVerification) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "Verification rejected: Selected Stock Owner is invalid or does not belong to the designated client.",
+            }),
+            { status: 403, headers: corsHeaders },
           );
         }
 
@@ -1265,13 +1283,13 @@ export default {
           ).bind(shipmentId, auth.context.warehouse_id),
         );
 
-        // Write shipment_details + client_id
+        // Write shipment_details + client_id + stock_owner_id
         batchStatements.push(
           env.DB.prepare(
             `INSERT INTO shipment_details (
           id, invoice_number, invoice_date, po_number, lr_number, e_way_bill_number, vehicle_number, driver_name, driver_phone_number,
-          seller_party_id, bill_to_party_id, ship_to_party_id, additional_data, warehouse_id, verified_by_user_id, client_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          seller_party_id, bill_to_party_id, ship_to_party_id, additional_data, warehouse_id, verified_by_user_id, client_id, stock_owner_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             shipmentId,
             String(header.invoice_number || "").trim(),
@@ -1291,6 +1309,7 @@ export default {
             auth.context.warehouse_id,
             auth.context.user_id,
             client_id,
+            stock_owner_id,
           ),
         );
 
@@ -1871,9 +1890,12 @@ export default {
           );
         }
 
-        // Capture client_id from the original pending task payload
+        // Join putaway_tasks with shipment_details to extract both client_id and stock_owner_id
         const originalTask = await env.DB.prepare(
-          "SELECT id, shipment_id, client_id FROM putaway_tasks WHERE id = ? AND warehouse_id = ? AND status = 'pending'",
+          `SELECT pt.id, pt.shipment_id, pt.client_id, sd.stock_owner_id 
+       FROM putaway_tasks pt 
+       JOIN shipment_details sd ON pt.shipment_id = sd.id 
+       WHERE pt.id = ? AND pt.warehouse_id = ? AND pt.status = 'pending'`,
         )
           .bind(putaway_task_id, auth.context.warehouse_id)
           .first();
@@ -1967,13 +1989,13 @@ export default {
 
           const itemBatchMeta = batchMetaByItemCode[cleanItemCode] || {};
 
-          // Inventory record insertion updated for generic source tracking
+          // Inventory insertion including both client_id and stock_owner_id
           batchStatements.push(
             env.DB.prepare(
               `INSERT INTO inventory (
             id, shipment_line_item_id, inventory_source, source_reference_id, warehouse_id, location_id, item_code, 
-            item_description, quantity, uom, category, manufacturing_date, expiry_date, client_id
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            item_description, quantity, uom, category, manufacturing_date, expiry_date, client_id, stock_owner_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ).bind(
               "inv_" + crypto.randomUUID(),
               itemBatchMeta.shipment_line_item_id,
@@ -1989,6 +2011,7 @@ export default {
               itemBatchMeta.manufacturing_date,
               itemBatchMeta.expiry_date,
               originalTask.client_id,
+              originalTask.stock_owner_id,
             ),
           );
 
@@ -2072,10 +2095,13 @@ export default {
           `SELECT 
         i.id, i.shipment_line_item_id, i.inventory_source, i.source_reference_id, i.warehouse_id, i.location_id, 
         i.item_code, i.item_description, i.quantity, i.uom, i.category, i.manufacturing_date, 
-        i.expiry_date, i.created_at, i.client_id, c.name AS client_name, c.code AS client_code, 
+        i.expiry_date, i.created_at, i.client_id, i.stock_owner_id,
+        c.name AS client_name, c.code AS client_code,
+        so.name AS stock_owner_name, so.code AS stock_owner_code,
         u_verified.username AS verified_by, u_putaway.username AS putaway_by
      FROM inventory i
      LEFT JOIN clients c ON i.client_id = c.id
+     LEFT JOIN stock_owners so ON i.stock_owner_id = so.id
      LEFT JOIN shipment_line_items sli ON i.shipment_line_item_id = sli.id
      LEFT JOIN shipment_details sd ON sli.shipment_id = sd.id
      LEFT JOIN users u_verified ON sd.verified_by_user_id = u_verified.id
@@ -2159,12 +2185,10 @@ export default {
         });
       }
 
-      // Strict Role Enforcement Check
       if (auth.context.role !== "admin") {
         return new Response(
           JSON.stringify({
-            error:
-              "Operation Forbidden: Provisioning client identities requires Administrator rights.",
+            error: "Operation Forbidden: Admin access required.",
           }),
           { status: 403, headers: corsHeaders },
         );
@@ -2185,34 +2209,16 @@ export default {
         const phone = payload.phone ? String(payload.phone).trim() : null;
         const email = payload.email ? String(payload.email).trim() : null;
 
-        // Server-side Param validations
         if (!name || !code) {
           return new Response(
             JSON.stringify({
-              error:
-                "Missing required values: Client Name and Code are mandatory fields.",
+              error: "Client Name and Unique Code are mandatory fields.",
             }),
-            {
-              status: 400,
-              headers: corsHeaders,
-            },
+            { status: 400, headers: corsHeaders },
           );
         }
 
-        if (gstin && gstin.length !== 15) {
-          return new Response(
-            JSON.stringify({
-              error:
-                "Invalid GSTIN payload: Must be exactly 15 alphanumeric characters long.",
-            }),
-            {
-              status: 400,
-              headers: corsHeaders,
-            },
-          );
-        }
-
-        // Verify Unique Code Constraint within specific Warehouse Domain
+        // Check code uniqueness within this warehouse
         const existingCode = await env.DB.prepare(
           "SELECT id FROM clients WHERE warehouse_id = ? AND code = ?",
         )
@@ -2222,21 +2228,188 @@ export default {
         if (existingCode) {
           return new Response(
             JSON.stringify({
-              error: `Naming conflict: Client code '${code}' is already actively deployed inside this warehouse footprint.`,
+              error: `Client code '${code}' is already in use in this warehouse.`,
             }),
             { status: 409, headers: corsHeaders },
           );
         }
 
         const newClientId = "cli_" + crypto.randomUUID();
+        const defaultStockOwnerId = "so_" + crypto.randomUUID();
 
+        // Atomic transaction: Provision Client and default Stock Owner concurrently
+        await env.DB.batch([
+          env.DB.prepare(
+            `INSERT INTO clients (id, warehouse_id, name, code, gstin, contact_person, phone, email, status, created_by_user_id, updated_by_user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL)`,
+          ).bind(
+            newClientId,
+            auth.context.warehouse_id,
+            name,
+            code,
+            gstin,
+            contactPerson,
+            phone,
+            email,
+            auth.context.user_id,
+          ),
+
+          env.DB.prepare(
+            `INSERT INTO stock_owners (id, client_id, warehouse_id, name, code, gstin, contact_person, phone, email, status, created_by_user_id, updated_by_user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL)`,
+          ).bind(
+            defaultStockOwnerId,
+            newClientId,
+            auth.context.warehouse_id,
+            name,
+            code,
+            gstin,
+            contactPerson,
+            phone,
+            email,
+            auth.context.user_id,
+          ),
+        ]);
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            message: "Client and Default Stock Owner onboarded successfully.",
+            client_id: newClientId,
+            default_stock_owner_id: defaultStockOwnerId,
+          }),
+          {
+            status: 201,
+            headers: { "Content-Type": "application/json", ...corsHeaders },
+          },
+        );
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+    }
+
+    // =========================================================================
+    // GET /api/stock-owners -> List stock owners (Optionally filtered by client_id)
+    // =========================================================================
+    if (request.method === "GET" && url.pathname === "/api/stock-owners") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success)
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+
+      try {
+        const clientId = url.searchParams.get("client_id");
+        let query = `
+      SELECT so.*, c.name AS client_name, c.code AS client_code
+      FROM stock_owners so
+      JOIN clients c ON so.client_id = c.id
+      WHERE so.warehouse_id = ?
+    `;
+        const params = [auth.context.warehouse_id];
+
+        if (clientId) {
+          query += " AND so.client_id = ?";
+          params.push(clientId);
+        }
+
+        query += " ORDER BY so.name ASC";
+
+        const rows = await env.DB.prepare(query)
+          .bind(...params)
+          .all();
+        return new Response(JSON.stringify({ stock_owners: rows.results }), {
+          status: 200,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+    }
+
+    // =========================================================================
+    // POST /api/stock-owners -> Create custom Stock Owner
+    // =========================================================================
+    if (request.method === "POST" && url.pathname === "/api/stock-owners") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success)
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+
+      try {
+        const payload = await request.json();
+        const clientId = String(payload.client_id || "").trim();
+        const name = String(payload.name || "").trim();
+        const code = String(payload.code || "")
+          .trim()
+          .toUpperCase();
+        const gstin = payload.gstin
+          ? String(payload.gstin).trim().toUpperCase()
+          : null;
+        const contactPerson = payload.contact_person
+          ? String(payload.contact_person).trim()
+          : null;
+        const phone = payload.phone ? String(payload.phone).trim() : null;
+        const email = payload.email ? String(payload.email).trim() : null;
+
+        if (!clientId || !name || !code) {
+          return new Response(
+            JSON.stringify({
+              error: "Client, Stock Owner Name, and Unique Code are required.",
+            }),
+            { status: 400, headers: corsHeaders },
+          );
+        }
+
+        // Verify parent client exists in this warehouse
+        const clientExists = await env.DB.prepare(
+          "SELECT id FROM clients WHERE id = ? AND warehouse_id = ?",
+        )
+          .bind(clientId, auth.context.warehouse_id)
+          .first();
+
+        if (!clientExists) {
+          return new Response(
+            JSON.stringify({
+              error: "Selected Client does not exist in this warehouse.",
+            }),
+            { status: 404, headers: corsHeaders },
+          );
+        }
+
+        // Code uniqueness check within warehouse
+        const codeExists = await env.DB.prepare(
+          "SELECT id FROM stock_owners WHERE warehouse_id = ? AND code = ?",
+        )
+          .bind(auth.context.warehouse_id, code)
+          .first();
+
+        if (codeExists) {
+          return new Response(
+            JSON.stringify({
+              error: `Stock Owner code '${code}' already exists in this warehouse.`,
+            }),
+            { status: 409, headers: corsHeaders },
+          );
+        }
+
+        const newOwnerId = "so_" + crypto.randomUUID();
         await env.DB.prepare(
-          `INSERT INTO clients (
-        id, warehouse_id, name, code, gstin, contact_person, phone, email, status, created_by_user_id, updated_by_user_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL)`,
+          `INSERT INTO stock_owners (id, client_id, warehouse_id, name, code, gstin, contact_person, phone, email, status, created_by_user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
         )
           .bind(
-            newClientId,
+            newOwnerId,
+            clientId,
             auth.context.warehouse_id,
             name,
             code,
@@ -2251,8 +2424,8 @@ export default {
         return new Response(
           JSON.stringify({
             success: true,
-            message: "Client master identity mapped successfully.",
-            client_id: newClientId,
+            message: "Stock Owner created successfully.",
+            stock_owner_id: newOwnerId,
           }),
           {
             status: 201,
