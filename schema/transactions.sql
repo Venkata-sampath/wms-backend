@@ -3,7 +3,7 @@ DROP TABLE IF EXISTS transactions;
 CREATE TABLE transactions (
     id TEXT PRIMARY KEY,
     warehouse_id TEXT NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
-    reference_id TEXT NOT NULL REFERENCES shipment_details(id) ON DELETE CASCADE,
+    reference_id TEXT NOT NULL,
     client_id TEXT NOT NULL REFERENCES clients(id),
     transaction_type TEXT NOT NULL,
     status TEXT NOT NULL,
