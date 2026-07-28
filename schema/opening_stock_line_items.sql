@@ -11,7 +11,6 @@ CREATE TABLE IF NOT EXISTS opening_stock_line_items (
     batch_number TEXT,
     manufacturing_date TEXT,
     expiry_date TEXT,
-    location_id TEXT NOT NULL,
+    location_id TEXT NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (location_id, warehouse_id) REFERENCES locations(id, warehouse_id) ON DELETE CASCADE
 );
