@@ -3,6 +3,7 @@
   "name": "wms",
   "main": "src/index.js",
   "compatibility_date": "2026-06-25",
+  "compatibility_flags": ["nodejs_compat"],
   "vars": {
     "MODEL": "meta-llama/llama-3.1-8b-instruct",
     "CLOUDINARY_CLOUD_NAME": "dyjam1u7r",
