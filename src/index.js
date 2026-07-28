@@ -2762,7 +2762,7 @@ export default {
         }
 
         const warehouseId = auth.context.warehouse_id;
-        const userId = auth.context.id;
+        const userId = auth.context.user_id;
         const importId = `osi_${crypto.randomUUID().slice(0, 8)}`;
         const transactionId = `tx_os_${crypto.randomUUID().slice(0, 8)}`;
 
