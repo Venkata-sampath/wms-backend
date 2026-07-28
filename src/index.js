@@ -2866,8 +2866,9 @@ export default {
         }
 
         // Execute atomic transaction rollback if any statement fails
+        console.log("Statements:", dbStatements.length);
         await env.DB.batch(dbStatements);
-
+        console.log("Batch completed");
         return new Response(
           JSON.stringify({
             success: true,
