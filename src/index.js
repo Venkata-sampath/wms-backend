@@ -1,5 +1,225 @@
 // src/index.js
 
+import * as XLSX from "xlsx";
+
+// =========================================================================
+// OPENING STOCK PARSING & VALIDATION ENGINE
+// =========================================================================
+
+const REQUIRED_EXCEL_HEADERS = [
+  "Item Code",
+  "Item Description",
+  "Quantity",
+  "UOM",
+  "Category",
+  "Location",
+  "Batch Number",
+  "Manufacturing Date",
+  "Expiry Date",
+];
+
+const VALID_CATEGORIES = ["ambient", "frozen", "chiller"];
+
+function parseAndValidateExcel(arrayBuffer) {
+  const errors = [];
+  const warnings = [];
+
+  let workbook;
+  try {
+    workbook = XLSX.read(new Uint8Array(arrayBuffer), {
+      type: "array",
+      cellDates: true,
+    });
+  } catch (err) {
+    return {
+      isValid: false,
+      errors: ["Invalid Excel file format or corrupted file."],
+      warnings: [],
+      parsedRows: [],
+    };
+  }
+
+  const sheetName = workbook.SheetNames[0];
+  if (!sheetName) {
+    return {
+      isValid: false,
+      errors: ["Excel workbook contains no readable sheets."],
+      warnings: [],
+      parsedRows: [],
+    };
+  }
+
+  const sheet = workbook.Sheets[sheetName];
+  const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+
+  if (!rawRows || rawRows.length < 2) {
+    return {
+      isValid: false,
+      errors: [
+        "Excel file must contain a header row and at least one data row.",
+      ],
+      warnings: [],
+      parsedRows: [],
+    };
+  }
+
+  // Header Validation
+  const fileHeaders = rawRows[0].map((h) => String(h || "").trim());
+  const headerMap = {};
+
+  REQUIRED_EXCEL_HEADERS.forEach((reqHeader) => {
+    const idx = fileHeaders.findIndex(
+      (fh) => fh.toLowerCase() === reqHeader.toLowerCase(),
+    );
+    if (idx === -1) {
+      errors.push(`Missing mandatory header column: "${reqHeader}"`);
+    } else {
+      headerMap[reqHeader] = idx;
+    }
+  });
+
+  if (errors.length > 0) {
+    return { isValid: false, errors, warnings, parsedRows: [] };
+  }
+
+  // Row Data Validation
+  const parsedRows = [];
+  const duplicateTracker = new Set();
+
+  for (let i = 1; i < rawRows.length; i++) {
+    const row = rawRows[i];
+    const excelRowNum = i + 1;
+
+    // Check if entire row is empty
+    const isEmptyRow = row.every((cell) => String(cell || "").trim() === "");
+    if (isEmptyRow) continue;
+
+    const itemCode = String(row[headerMap["Item Code"]] || "").trim();
+    const itemDescription = String(
+      row[headerMap["Item Description"]] || "",
+    ).trim();
+    const rawQuantity = row[headerMap["Quantity"]];
+    const uom = String(row[headerMap["UOM"]] || "").trim();
+    const category = String(row[headerMap["Category"]] || "").trim();
+    const location = String(row[headerMap["Location"]] || "").trim();
+    const batchNumber = String(row[headerMap["Batch Number"]] || "").trim();
+    const rawMfgDate = row[headerMap["Manufacturing Date"]];
+    const rawExpDate = row[headerMap["Expiry Date"]];
+
+    // Required Field Validations
+    if (!itemCode) errors.push(`Row ${excelRowNum}: Item Code is mandatory.`);
+    if (!itemDescription)
+      errors.push(`Row ${excelRowNum}: Item Description is mandatory.`);
+    if (!uom) errors.push(`Row ${excelRowNum}: UOM is mandatory.`);
+    if (!location) errors.push(`Row ${excelRowNum}: Location is mandatory.`);
+
+    // Quantity Validation
+    const quantityNum = Number(rawQuantity);
+    if (
+      rawQuantity === "" ||
+      rawQuantity === null ||
+      isNaN(quantityNum) ||
+      quantityNum <= 0
+    ) {
+      errors.push(
+        `Row ${excelRowNum}: Quantity must be a valid numeric value greater than 0.`,
+      );
+    }
+
+    // Category Validation (Case-insensitive)
+    if (!category || !VALID_CATEGORIES.includes(category.toLowerCase())) {
+      errors.push(
+        `Row ${excelRowNum}: Category "${category}" is invalid. Allowed values: Ambient, Frozen, Chiller.`,
+      );
+    }
+
+    // Date Validations
+    const mfgDate = parseExcelDate(rawMfgDate);
+    if (rawMfgDate && mfgDate === "INVALID") {
+      errors.push(
+        `Row ${excelRowNum}: Manufacturing Date "${rawMfgDate}" is not a valid date.`,
+      );
+    }
+
+    const expDate = parseExcelDate(rawExpDate);
+    if (rawExpDate && expDate === "INVALID") {
+      errors.push(
+        `Row ${excelRowNum}: Expiry Date "${rawExpDate}" is not a valid date.`,
+      );
+    }
+
+    if (mfgDate && expDate && mfgDate !== "INVALID" && expDate !== "INVALID") {
+      if (new Date(expDate) < new Date(mfgDate)) {
+        errors.push(
+          `Row ${excelRowNum}: Expiry Date (${expDate}) cannot be earlier than Manufacturing Date (${mfgDate}).`,
+        );
+      }
+    }
+
+    // Duplicate Validation Warning
+    const dupKey = `${itemCode.toLowerCase()}|${batchNumber.toLowerCase()}|${location.toUpperCase()}`;
+    if (duplicateTracker.has(dupKey)) {
+      warnings.push(
+        `Row ${excelRowNum}: Duplicate item detected for Item Code "${itemCode}", Batch "${batchNumber || "N/A"}", and Location "${location.toUpperCase()}".`,
+      );
+    } else {
+      duplicateTracker.add(dupKey);
+    }
+
+    parsedRows.push({
+      item_code: itemCode,
+      item_description: itemDescription,
+      quantity: quantityNum,
+      uom: uom,
+      category: normalizeCategory(category),
+      location: location.toUpperCase(),
+      batch_number: batchNumber || null,
+      manufacturing_date: mfgDate === "INVALID" ? null : mfgDate,
+      expiry_date: expDate === "INVALID" ? null : expDate,
+    });
+  }
+
+  if (parsedRows.length === 0 && errors.length === 0) {
+    errors.push("Excel file contains no data rows.");
+  }
+
+  return {
+    isValid: errors.length === 0,
+    errors,
+    warnings,
+    totalRows: parsedRows.length,
+    parsedRows,
+  };
+}
+
+function parseExcelDate(val) {
+  if (val === null || val === undefined || val === "") return null;
+  if (val instanceof Date) {
+    return isNaN(val.getTime()) ? "INVALID" : val.toISOString().split("T")[0];
+  }
+  if (typeof val === "number") {
+    const parsed = XLSX.SSF.parse_date_code(val);
+    if (parsed) {
+      const y = parsed.y;
+      const m = String(parsed.m).padStart(2, "0");
+      const d = String(parsed.d).padStart(2, "0");
+      return `${y}-${m}-${d}`;
+    }
+  }
+  const str = String(val).trim();
+  const dateObj = new Date(str);
+  return isNaN(dateObj.getTime())
+    ? "INVALID"
+    : dateObj.toISOString().split("T")[0];
+}
+
+function normalizeCategory(cat) {
+  const lower = String(cat).toLowerCase();
+  if (lower === "frozen") return "Frozen";
+  if (lower === "chiller") return "Chiller";
+  return "Ambient";
+}
+
 // =========================================================================
 // 1. BASE64URL HELPERS (Required for standard JWT specifications)
 // =========================================================================
@@ -2464,37 +2684,235 @@ export default {
       }
     }
 
+    // POST /api/opening-stock/validate
+    if (
+      request.method === "POST" &&
+      url.pathname === "/api/opening-stock/validate"
+    ) {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success)
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+
+      try {
+        const formData = await request.formData();
+        const file = formData.get("file");
+        if (!file)
+          return new Response(
+            JSON.stringify({ error: "No Excel file uploaded." }),
+            { status: 400, headers: corsHeaders },
+          );
+
+        const arrayBuffer = await file.arrayBuffer();
+        const result = parseAndValidateExcel(arrayBuffer);
+
+        return new Response(JSON.stringify(result), {
+          status: 200,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+    }
+
+    // POST /api/opening-stock/import
+    if (
+      request.method === "POST" &&
+      url.pathname === "/api/opening-stock/import"
+    ) {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success)
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+
+      try {
+        const formData = await request.formData();
+        const file = formData.get("file");
+        const clientId = formData.get("client_id");
+        const stockOwnerId = formData.get("stock_owner_id");
+
+        if (!file || !clientId || !stockOwnerId) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "Missing required import parameters (file, client_id, stock_owner_id).",
+            }),
+            { status: 400, headers: corsHeaders },
+          );
+        }
+
+        const arrayBuffer = await file.arrayBuffer();
+        const validation = parseAndValidateExcel(arrayBuffer);
+
+        if (!validation.isValid) {
+          return new Response(
+            JSON.stringify({
+              error: "Import rejected due to validation errors.",
+              errors: validation.errors,
+            }),
+            { status: 400, headers: corsHeaders },
+          );
+        }
+
+        const warehouseId = auth.context.warehouse_id;
+        const userId = auth.context.id;
+        const importId = `osi_${crypto.randomUUID().slice(0, 8)}`;
+        const transactionId = `tx_os_${crypto.randomUUID().slice(0, 8)}`;
+
+        // Get existing locations to avoid duplicate insertion statements in the atomic batch
+        const existingLocationsRes = await env.DB.prepare(
+          "SELECT id FROM locations WHERE warehouse_id = ?",
+        )
+          .bind(warehouseId)
+          .all();
+        const knownLocationIds = new Set(
+          (existingLocationsRes.results || []).map((l) => l.id),
+        );
+
+        const dbStatements = [];
+
+        // 1. Insert Opening Stock Import Batch Header
+        dbStatements.push(
+          env.DB.prepare(
+            `INSERT INTO opening_stock_imports (id, warehouse_id, client_id, stock_owner_id, uploaded_by_user_id, total_rows, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+          ).bind(
+            importId,
+            warehouseId,
+            clientId,
+            stockOwnerId,
+            userId,
+            validation.parsedRows.length,
+          ),
+        );
+
+        // 2. Insert Transaction Record
+        dbStatements.push(
+          env.DB.prepare(
+            `INSERT INTO transactions (id, warehouse_id, reference_id, client_id, transaction_type, status, created_by_user_id, completed_by_user_id, created_at, completed_at)
+         VALUES (?, ?, ?, ?, 'opening_stock', 'completed', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          ).bind(
+            transactionId,
+            warehouseId,
+            importId,
+            clientId,
+            userId,
+            userId,
+          ),
+        );
+
+        // 3. Process Line Items, Locations, and Live Inventory Records
+        for (const row of validation.parsedRows) {
+          const locUpper = row.location.toUpperCase();
+
+          if (!knownLocationIds.has(locUpper)) {
+            dbStatements.push(
+              env.DB.prepare(
+                `INSERT INTO locations (id, warehouse_id, status) VALUES (?, ?, 'available')`,
+              ).bind(locUpper, warehouseId),
+            );
+            knownLocationIds.add(locUpper);
+          }
+
+          const lineItemId = `osli_${crypto.randomUUID().slice(0, 8)}`;
+          dbStatements.push(
+            env.DB.prepare(
+              `INSERT INTO opening_stock_line_items (id, opening_stock_import_id, item_code, item_description, quantity, uom, category, batch_number, manufacturing_date, expiry_date, location_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+            ).bind(
+              lineItemId,
+              importId,
+              row.item_code,
+              row.item_description,
+              row.quantity,
+              row.uom,
+              row.category,
+              row.batch_number,
+              row.manufacturing_date,
+              row.expiry_date,
+              locUpper,
+            ),
+          );
+
+          const inventoryId = `inv_os_${crypto.randomUUID().slice(0, 8)}`;
+          dbStatements.push(
+            env.DB.prepare(
+              `INSERT INTO inventory (id, inventory_source, source_reference_id, shipment_line_item_id, warehouse_id, client_id, stock_owner_id, location_id, item_code, item_description, quantity, uom, category, manufacturing_date, expiry_date, batch_number, created_at)
+           VALUES (?, 'opening_stock', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+            ).bind(
+              inventoryId,
+              lineItemId,
+              warehouseId,
+              clientId,
+              stockOwnerId,
+              locUpper,
+              row.item_code,
+              row.item_description,
+              row.quantity,
+              row.uom,
+              row.category,
+              row.manufacturing_date,
+              row.expiry_date,
+              row.batch_number,
+            ),
+          );
+        }
+
+        // Execute atomic transaction rollback if any statement fails
+        await env.DB.batch(dbStatements);
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            opening_stock_import_id: importId,
+            transaction_id: transactionId,
+            total_rows: validation.parsedRows.length,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json", ...corsHeaders },
+          },
+        );
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+    }
+
     // =========================================================================
     // GET /api/transactions
     // =========================================================================
     if (request.method === "GET" && url.pathname === "/api/transactions") {
       const auth = await getTenantContext(request, env);
-      if (!auth.success) {
+      if (!auth.success)
         return new Response(JSON.stringify({ error: auth.error }), {
           status: auth.status,
           headers: corsHeaders,
         });
-      }
-
-      if (auth.context.role === "super_admin") {
-        return new Response(JSON.stringify({ error: "Access Denied" }), {
-          status: 403,
-          headers: corsHeaders,
-        });
-      }
 
       try {
-        // MODIFIED: Selected c.code AS client_code
         const registry = await env.DB.prepare(
           `SELECT
          t.id AS transaction_id, t.transaction_type, t.status, t.reference_id AS entity_id,
          t.warehouse_id, t.created_at, t.completed_at, t.client_id, c.name AS client_name, c.code AS client_code,
-         sd.invoice_number, sd.invoice_date, sd.vehicle_number, u.username AS verified_by
+         sd.invoice_number, sd.invoice_date, sd.vehicle_number,
+         COALESCE(u_inbound.username, u_os.username) AS verified_by
        FROM transactions t
        LEFT JOIN clients c ON t.client_id = c.id
-       JOIN shipment_details sd ON sd.id = t.reference_id
-       LEFT JOIN users u ON u.id = sd.verified_by_user_id
-       WHERE t.warehouse_id = ? AND t.transaction_type = 'inbound'
+       LEFT JOIN shipment_details sd ON sd.id = t.reference_id AND t.transaction_type = 'inbound'
+       LEFT JOIN users u_inbound ON u_inbound.id = sd.verified_by_user_id
+       LEFT JOIN opening_stock_imports osi ON osi.id = t.reference_id AND t.transaction_type = 'opening_stock'
+       LEFT JOIN users u_os ON u_os.id = osi.uploaded_by_user_id
+       WHERE t.warehouse_id = ? AND t.transaction_type IN ('inbound', 'opening_stock')
        ORDER BY t.created_at DESC`,
         )
           .bind(auth.context.warehouse_id)
@@ -2596,6 +3014,34 @@ export default {
               shipment_header: shipment || null,
               shipment_line_items: lineItems.results,
               parties: { seller, bill_to, ship_to },
+            };
+          },
+          opening_stock: async () => {
+            const importHeader = await env.DB.prepare(
+              `SELECT osi.*, u.username AS uploaded_by, 
+              cl.name AS client_name, cl.code AS client_code,
+              so.name AS stock_owner_name, so.code AS stock_owner_code
+       FROM opening_stock_imports osi
+       LEFT JOIN users u ON u.id = osi.uploaded_by_user_id
+       LEFT JOIN clients cl ON osi.client_id = cl.id
+       LEFT JOIN stock_owners so ON osi.stock_owner_id = so.id
+       WHERE osi.id = ? AND osi.warehouse_id = ?`,
+            )
+              .bind(transaction.reference_id, auth.context.warehouse_id)
+              .first();
+
+            const lineItems = await env.DB.prepare(
+              `SELECT osli.*
+       FROM opening_stock_line_items osli
+       WHERE osli.opening_stock_import_id = ?
+       ORDER BY osli.rowid ASC`,
+            )
+              .bind(transaction.reference_id)
+              .all();
+
+            return {
+              import_header: importHeader || null,
+              opening_stock_line_items: lineItems.results || [],
             };
           },
         };
