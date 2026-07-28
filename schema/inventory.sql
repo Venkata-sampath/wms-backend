@@ -16,6 +16,7 @@ CREATE TABLE inventory (
     category TEXT NOT NULL,
     manufacturing_date TEXT,
     expiry_date TEXT,
+    batch_number TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (location_id, warehouse_id) REFERENCES locations(id, warehouse_id) ON DELETE CASCADE
 );

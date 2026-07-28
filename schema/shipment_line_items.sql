@@ -30,6 +30,7 @@ CREATE TABLE shipment_line_items (
     discrepancy_notes TEXT,
     manufacturing_date TEXT,
     expiry_date TEXT,
+    batch_number TEXT,
 
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

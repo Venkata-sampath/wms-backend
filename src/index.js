@@ -1128,7 +1128,6 @@ export default {
           );
         }
 
-        // Security Check: Verify that client context exists and belongs to this warehouse tenant
         const clientVerification = await env.DB.prepare(
           "SELECT id FROM clients WHERE id = ? AND warehouse_id = ?",
         )
@@ -1145,7 +1144,6 @@ export default {
           );
         }
 
-        // Security Check: Verify stock owner context exists, belongs to client, and belongs to warehouse
         const stockOwnerVerification = await env.DB.prepare(
           "SELECT id FROM stock_owners WHERE id = ? AND client_id = ? AND warehouse_id = ?",
         )
@@ -1162,7 +1160,6 @@ export default {
           );
         }
 
-        // Security Check: Verify staging record ownership
         const stagingVerification = await env.DB.prepare(
           "SELECT id FROM inbound_shipments WHERE id = ? AND warehouse_id = ?",
         )
@@ -1238,6 +1235,12 @@ export default {
           return trimmed === "" ? null : trimmed;
         };
 
+        const cleanBatchNumber = (val) => {
+          if (val === undefined || val === null) return null;
+          const trimmed = String(val).trim();
+          return trimmed === "" ? null : trimmed;
+        };
+
         const VALID_ITEM_CATEGORIES = new Set(["frozen", "chiller", "ambient"]);
         const cleanCategory = (val) => {
           if (val === undefined || val === null) {
@@ -1287,9 +1290,9 @@ export default {
         batchStatements.push(
           env.DB.prepare(
             `INSERT INTO shipment_details (
-          id, invoice_number, invoice_date, po_number, lr_number, e_way_bill_number, vehicle_number, driver_name, driver_phone_number,
-          seller_party_id, bill_to_party_id, ship_to_party_id, additional_data, warehouse_id, verified_by_user_id, client_id, stock_owner_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id, invoice_number, invoice_date, po_number, lr_number, e_way_bill_number, vehicle_number, driver_name, driver_phone_number,
+      seller_party_id, bill_to_party_id, ship_to_party_id, additional_data, warehouse_id, verified_by_user_id, client_id, stock_owner_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             shipmentId,
             String(header.invoice_number || "").trim(),
@@ -1333,17 +1336,18 @@ export default {
               item.manufacturing_date,
             );
             const resolvedExpiryDate = cleanDateField(item.expiry_date);
+            const resolvedBatchNumber = cleanBatchNumber(item.batch_number);
             const lineItemId = crypto.randomUUID();
             const verifiedUom = String(item.uom || "PCS").trim();
 
             batchStatements.push(
               env.DB.prepare(
                 `INSERT INTO shipment_line_items (
-              id, shipment_id, item_code, item_description, hsn_sac, ordered_quantity, uom, rate, gross_amount,
-              discount_amount, taxable_amount, tax_rate_percent, cgst, sgst, igst, cess, total_amount, category,
-              received_quantity, damaged_quantity, shortage_quantity, excess_quantity, discrepancy_uom, discrepancy_notes,
-              manufacturing_date, expiry_date
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          id, shipment_id, item_code, item_description, hsn_sac, ordered_quantity, uom, rate, gross_amount,
+          discount_amount, taxable_amount, tax_rate_percent, cgst, sgst, igst, cess, total_amount, category,
+          received_quantity, damaged_quantity, shortage_quantity, excess_quantity, discrepancy_uom, discrepancy_notes,
+          manufacturing_date, expiry_date, batch_number
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               ).bind(
                 lineItemId,
                 shipmentId,
@@ -1371,6 +1375,7 @@ export default {
                 String(item.discrepancy_notes || "").trim(),
                 resolvedManufacturingDate,
                 resolvedExpiryDate,
+                resolvedBatchNumber,
               ),
             );
 
@@ -1378,8 +1383,8 @@ export default {
             if (targetPutawayQty > 0) {
               batchStatements.push(
                 env.DB.prepare(
-                  `INSERT INTO putaway_task_items (id, putaway_task_id, item_code, item_description, quantity_to_place, category, expiry_date, manufacturing_date, shipment_line_item_id, uom)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                  `INSERT INTO putaway_task_items (id, putaway_task_id, item_code, item_description, quantity_to_place, category, expiry_date, manufacturing_date, shipment_line_item_id, uom, batch_number)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 ).bind(
                   "pti_" + crypto.randomUUID(),
                   putawayTaskId,
@@ -1391,6 +1396,7 @@ export default {
                   resolvedManufacturingDate,
                   lineItemId,
                   verifiedUom,
+                  resolvedBatchNumber,
                 ),
               );
             }
@@ -1408,7 +1414,7 @@ export default {
         batchStatements.push(
           env.DB.prepare(
             `INSERT INTO transactions (id, warehouse_id, transaction_type, reference_id, status, created_by_user_id, completed_by_user_id, completed_at, remarks, client_id)
-         VALUES (?, ?, 'inbound', ?, 'pending_putaway', ?, NULL, NULL, NULL, ?)`,
+     VALUES (?, ?, 'inbound', ?, 'pending_putaway', ?, NULL, NULL, NULL, ?)`,
           ).bind(
             transactionId,
             auth.context.warehouse_id,
@@ -1692,15 +1698,14 @@ export default {
       }
 
       try {
-        // MODIFIED: Joined clients table to fetch client_code and client_name
         const tasksQuery = await env.DB.prepare(
           `SELECT t.id, t.shipment_id, t.created_at, d.invoice_number, c.code AS client_code, c.name AS client_name, u.username AS verified_by
-           FROM putaway_tasks t
-           LEFT JOIN shipment_details d ON t.shipment_id = d.id
-           LEFT JOIN clients c ON d.client_id = c.id
-           LEFT JOIN users u ON d.verified_by_user_id = u.id
-           WHERE t.warehouse_id = ? AND t.status = 'pending'
-           ORDER BY t.created_at DESC`,
+       FROM putaway_tasks t
+       LEFT JOIN shipment_details d ON t.shipment_id = d.id
+       LEFT JOIN clients c ON d.client_id = c.id
+       LEFT JOIN users u ON d.verified_by_user_id = u.id
+       WHERE t.warehouse_id = ? AND t.status = 'pending'
+       ORDER BY t.created_at DESC`,
         )
           .bind(auth.context.warehouse_id)
           .all();
@@ -1718,9 +1723,9 @@ export default {
         const placeholders = taskIds.map(() => "?").join(",");
 
         const itemsQuery = await env.DB.prepare(
-          `SELECT putaway_task_id, id, item_code, item_description, quantity_to_place, category, manufacturing_date, expiry_date, shipment_line_item_id, uom
-           FROM putaway_task_items 
-           WHERE putaway_task_id IN (${placeholders})`,
+          `SELECT putaway_task_id, id, item_code, item_description, quantity_to_place, category, manufacturing_date, expiry_date, batch_number, shipment_line_item_id, uom
+       FROM putaway_task_items 
+       WHERE putaway_task_id IN (${placeholders})`,
         )
           .bind(...taskIds)
           .all();
@@ -1766,7 +1771,7 @@ export default {
       }
 
       try {
-        // MODIFIED: Joined clients table to fetch client_code and client_name
+        // Joined clients table to fetch client_code and client_name
         const tasksQuery = await env.DB.prepare(
           `SELECT t.id, t.shipment_id, t.created_at, d.invoice_number, c.code AS client_code, c.name AS client_name,
                   u1.username AS verified_by, u2.username AS completed_by, tx.completed_at AS completed_date_time
@@ -1794,8 +1799,9 @@ export default {
         const taskIds = completedTasks.map((t) => t.id);
         const placeholders = taskIds.map(() => "?").join(",");
 
+        // UPDATED: Included batch_number in SELECT clause
         const itemsQuery = await env.DB.prepare(
-          `SELECT putaway_task_id, id, item_code, item_description, quantity_to_place, category, manufacturing_date, expiry_date, shipment_line_item_id, uom
+          `SELECT putaway_task_id, id, item_code, item_description, quantity_to_place, category, manufacturing_date, expiry_date, batch_number, shipment_line_item_id, uom
            FROM putaway_task_items 
            WHERE putaway_task_id IN (${placeholders})`,
         )
@@ -1890,12 +1896,11 @@ export default {
           );
         }
 
-        // Join putaway_tasks with shipment_details to extract both client_id and stock_owner_id
         const originalTask = await env.DB.prepare(
           `SELECT pt.id, pt.shipment_id, pt.client_id, sd.stock_owner_id 
-       FROM putaway_tasks pt 
-       JOIN shipment_details sd ON pt.shipment_id = sd.id 
-       WHERE pt.id = ? AND pt.warehouse_id = ? AND pt.status = 'pending'`,
+   FROM putaway_tasks pt 
+   JOIN shipment_details sd ON pt.shipment_id = sd.id 
+   WHERE pt.id = ? AND pt.warehouse_id = ? AND pt.status = 'pending'`,
         )
           .bind(putaway_task_id, auth.context.warehouse_id)
           .first();
@@ -1911,7 +1916,7 @@ export default {
         }
 
         const originalItems = await env.DB.prepare(
-          "SELECT id, item_code, quantity_to_place, category, manufacturing_date, expiry_date, shipment_line_item_id, uom FROM putaway_task_items WHERE putaway_task_id = ?",
+          "SELECT id, item_code, quantity_to_place, category, manufacturing_date, expiry_date, batch_number, shipment_line_item_id, uom FROM putaway_task_items WHERE putaway_task_id = ?",
         )
           .bind(putaway_task_id)
           .all();
@@ -1929,6 +1934,7 @@ export default {
               category: targetItem.category ?? null,
               manufacturing_date: targetItem.manufacturing_date ?? null,
               expiry_date: targetItem.expiry_date ?? null,
+              batch_number: targetItem.batch_number ?? null,
               shipment_line_item_id: targetItem.shipment_line_item_id,
               uom: targetItem.uom,
             };
@@ -1989,13 +1995,12 @@ export default {
 
           const itemBatchMeta = batchMetaByItemCode[cleanItemCode] || {};
 
-          // Inventory insertion including both client_id and stock_owner_id
           batchStatements.push(
             env.DB.prepare(
               `INSERT INTO inventory (
-            id, shipment_line_item_id, inventory_source, source_reference_id, warehouse_id, location_id, item_code, 
-            item_description, quantity, uom, category, manufacturing_date, expiry_date, client_id, stock_owner_id
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id, shipment_line_item_id, inventory_source, source_reference_id, warehouse_id, location_id, item_code, 
+        item_description, quantity, uom, category, manufacturing_date, expiry_date, batch_number, client_id, stock_owner_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ).bind(
               "inv_" + crypto.randomUUID(),
               itemBatchMeta.shipment_line_item_id,
@@ -2010,6 +2015,7 @@ export default {
               itemBatchMeta.category,
               itemBatchMeta.manufacturing_date,
               itemBatchMeta.expiry_date,
+              itemBatchMeta.batch_number,
               originalTask.client_id,
               originalTask.stock_owner_id,
             ),
@@ -2018,7 +2024,7 @@ export default {
           batchStatements.push(
             env.DB.prepare(
               `INSERT INTO putaway_task_item_allocations (id, warehouse_id, putaway_task_item_id, location_id, quantity)
-           VALUES (?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?)`,
             ).bind(
               "alloc_" + crypto.randomUUID(),
               auth.context.warehouse_id,
@@ -2042,7 +2048,7 @@ export default {
         batchStatements.push(
           env.DB.prepare(
             `UPDATE transactions SET status = 'completed', completed_by_user_id = ?, completed_at = CURRENT_TIMESTAMP
-         WHERE transaction_type = 'inbound' AND reference_id = ? AND warehouse_id = ?`,
+     WHERE transaction_type = 'inbound' AND reference_id = ? AND warehouse_id = ?`,
           ).bind(
             auth.context.user_id,
             originalTask.shipment_id,
@@ -2093,23 +2099,23 @@ export default {
       try {
         const inventoryBalances = await env.DB.prepare(
           `SELECT 
-        i.id, i.shipment_line_item_id, i.inventory_source, i.source_reference_id, i.warehouse_id, i.location_id, 
-        i.item_code, i.item_description, i.quantity, i.uom, i.category, i.manufacturing_date, 
-        i.expiry_date, i.created_at, i.client_id, i.stock_owner_id,
-        c.name AS client_name, c.code AS client_code,
-        so.name AS stock_owner_name, so.code AS stock_owner_code,
-        u_verified.username AS verified_by, u_putaway.username AS putaway_by
-     FROM inventory i
-     LEFT JOIN clients c ON i.client_id = c.id
-     LEFT JOIN stock_owners so ON i.stock_owner_id = so.id
-     LEFT JOIN shipment_line_items sli ON i.shipment_line_item_id = sli.id
-     LEFT JOIN shipment_details sd ON sli.shipment_id = sd.id
-     LEFT JOIN users u_verified ON sd.verified_by_user_id = u_verified.id
-     LEFT JOIN putaway_task_items pti ON i.source_reference_id = pti.id AND i.inventory_source = 'putaway'
-     LEFT JOIN putaway_tasks pt ON pti.putaway_task_id = pt.id
-     LEFT JOIN users u_putaway ON pt.completed_by_user_id = u_putaway.id
-     WHERE i.warehouse_id = ? AND i.quantity > 0
-     ORDER BY i.location_id ASC, i.item_code ASC, i.created_at DESC`,
+    i.id, i.shipment_line_item_id, i.inventory_source, i.source_reference_id, i.warehouse_id, i.location_id, 
+    i.item_code, i.item_description, i.quantity, i.uom, i.category, i.manufacturing_date, 
+    i.expiry_date, i.batch_number, i.created_at, i.client_id, i.stock_owner_id,
+    c.name AS client_name, c.code AS client_code,
+    so.name AS stock_owner_name, so.code AS stock_owner_code,
+    u_verified.username AS verified_by, u_putaway.username AS putaway_by
+ FROM inventory i
+ LEFT JOIN clients c ON i.client_id = c.id
+ LEFT JOIN stock_owners so ON i.stock_owner_id = so.id
+ LEFT JOIN shipment_line_items sli ON i.shipment_line_item_id = sli.id
+ LEFT JOIN shipment_details sd ON sli.shipment_id = sd.id
+ LEFT JOIN users u_verified ON sd.verified_by_user_id = u_verified.id
+ LEFT JOIN putaway_task_items pti ON i.source_reference_id = pti.id AND i.inventory_source = 'putaway'
+ LEFT JOIN putaway_tasks pt ON pti.putaway_task_id = pt.id
+ LEFT JOIN users u_putaway ON pt.completed_by_user_id = u_putaway.id
+ WHERE i.warehouse_id = ? AND i.quantity > 0
+ ORDER BY i.location_id ASC, i.item_code ASC, i.created_at DESC`,
         )
           .bind(auth.context.warehouse_id)
           .all();
@@ -2571,6 +2577,7 @@ export default {
               .bind(transaction.reference_id, auth.context.warehouse_id)
               .first();
 
+            // SELECT * inherently returns the new batch_number column from shipment_line_items
             const lineItems = await env.DB.prepare(
               "SELECT * FROM shipment_line_items WHERE shipment_id = ? ORDER BY rowid ASC",
             )

@@ -10,5 +10,6 @@ CREATE TABLE putaway_task_items (
     quantity_to_place REAL NOT NULL,
     category TEXT NOT NULL,
     expiry_date TEXT,
-    manufacturing_date TEXT
+    manufacturing_date TEXT,
+    batch_number TEXT
 );
