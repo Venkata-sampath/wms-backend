@@ -1216,7 +1216,7 @@ export default {
           const securedUrl = cloudResult.secure_url;
 
           await env.DB.prepare(
-            "INSERT INTO document_pages (id, shipment_id, image_url, document_type, ocr_status) VALUES (?, ?, ?, ?, 'queued')",
+            "INSERT INTO document_pages (id, shipment_id, shipment_type, image_url, document_type, ocr_status) VALUES (?, ?, 'inbound', ?, ?, 'queued')",
           )
             .bind(pageId, shipmentId, securedUrl, documentType)
             .run();
@@ -1225,6 +1225,109 @@ export default {
           await env.OCR_QUEUE.send({
             pageId,
             shipmentId,
+            shipmentType: "inbound",
+            warehouseId: auth.context.warehouse_id,
+            imageUrl: securedUrl,
+            documentType,
+          });
+        }
+
+        return new Response(JSON.stringify({ success: true, shipmentId }), {
+          status: 200,
+          headers: corsHeaders,
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: corsHeaders,
+        });
+      }
+    }
+
+    // =========================================================================
+    // ENDPOINT: Outbound AI Upload — mirrors /api/inbound/upload exactly, but
+    // stages into outbound_shipments and tags document_pages as 'outbound' so
+    // the shared OCR/LLM pipeline can dispatch the right prompt + aggregator.
+    // =========================================================================
+    if (request.method === "POST" && url.pathname === "/api/outbound/upload") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+
+      if (auth.context.role === "super_admin") {
+        return new Response(
+          JSON.stringify({
+            error:
+              "Operation Forbidden: Super Admins must execute document uploads within a specific warehouse context.",
+          }),
+          { status: 400, headers: corsHeaders },
+        );
+      }
+
+      try {
+        const formData = await request.formData();
+        const files = formData.getAll("files");
+        const docTypes = formData.getAll("document_types");
+
+        if (files.length === 0) {
+          return new Response(JSON.stringify({ error: "No files detected" }), {
+            status: 400,
+            headers: corsHeaders,
+          });
+        }
+
+        const shipmentId = crypto.randomUUID();
+
+        await env.DB.prepare(
+          "INSERT INTO outbound_shipments (id, status, warehouse_id, uploaded_by_user_id) VALUES (?, 'processing', ?, ?)",
+        )
+          .bind(shipmentId, auth.context.warehouse_id, auth.context.user_id)
+          .run();
+
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          const documentType = docTypes[i] || "unknown";
+
+          const pageId = crypto.randomUUID();
+          const publicId = `outbound_${shipmentId}_${pageId}`;
+          const timestamp = Math.floor(Date.now() / 1000).toString();
+          const signature = await generateCloudinarySignature(
+            publicId,
+            timestamp,
+            env.CLOUDINARY_API_SECRET,
+          );
+
+          const cloudinaryFormData = new FormData();
+          cloudinaryFormData.append("file", file);
+          cloudinaryFormData.append("public_id", publicId);
+          cloudinaryFormData.append("timestamp", timestamp);
+          cloudinaryFormData.append("api_key", env.CLOUDINARY_API_KEY);
+          cloudinaryFormData.append("signature", signature);
+
+          const cloudResponse = await fetch(
+            `https://api.cloudinary.com/v1_1/${env.CLOUDINARY_CLOUD_NAME}/image/upload`,
+            { method: "POST", body: cloudinaryFormData },
+          );
+          const cloudResult = await cloudResponse.json();
+          if (!cloudResponse.ok)
+            throw new Error(cloudResult.error?.message || "Cloudinary failed");
+
+          const securedUrl = cloudResult.secure_url;
+
+          await env.DB.prepare(
+            "INSERT INTO document_pages (id, shipment_id, shipment_type, image_url, document_type, ocr_status) VALUES (?, ?, 'outbound', ?, ?, 'queued')",
+          )
+            .bind(pageId, shipmentId, securedUrl, documentType)
+            .run();
+
+          await env.OCR_QUEUE.send({
+            pageId,
+            shipmentId,
+            shipmentType: "outbound",
             warehouseId: auth.context.warehouse_id,
             imageUrl: securedUrl,
             documentType,
@@ -1269,7 +1372,7 @@ export default {
         }
 
         const page = await env.DB.prepare(
-          "SELECT id, shipment_id, document_type FROM document_pages WHERE ocr_job_id = ?",
+          "SELECT id, shipment_id, shipment_type, document_type FROM document_pages WHERE ocr_job_id = ?",
         )
           .bind(jobId)
           .first();
@@ -1291,6 +1394,7 @@ export default {
           pageId: page.id,
           markdown,
           shipmentId: page.shipment_id,
+          shipmentType: page.shipment_type,
           documentType: page.document_type,
         });
 
@@ -2320,7 +2424,7 @@ export default {
         const inventoryBalances = await env.DB.prepare(
           `SELECT 
     i.id, i.shipment_line_item_id, i.inventory_source, i.source_reference_id, i.warehouse_id, i.location_id, 
-    i.item_code, i.item_description, i.quantity, i.uom, i.category, i.manufacturing_date, 
+    i.item_code, i.item_description, i.quantity, i.reserved_quantity, (i.quantity - i.reserved_quantity) AS available_quantity, i.uom, i.category, i.manufacturing_date, 
     i.expiry_date, i.batch_number, i.created_at, i.client_id, i.stock_owner_id,
     c.name AS client_name, c.code AS client_code,
     so.name AS stock_owner_name, so.code AS stock_owner_code,
@@ -2905,15 +3009,18 @@ export default {
           `SELECT
          t.id AS transaction_id, t.transaction_type, t.status, t.reference_id AS entity_id,
          t.warehouse_id, t.created_at, t.completed_at, t.client_id, c.name AS client_name, c.code AS client_code,
-         sd.invoice_number, sd.invoice_date, sd.vehicle_number,
-         COALESCE(u_inbound.username, u_os.username) AS verified_by
+         COALESCE(sd.invoice_number, osd.eway_bill_number) AS invoice_number,
+         sd.invoice_date, COALESCE(sd.vehicle_number, osd.vehicle_number) AS vehicle_number,
+         COALESCE(u_inbound.username, u_os.username, u_outbound.username) AS verified_by
        FROM transactions t
        LEFT JOIN clients c ON t.client_id = c.id
        LEFT JOIN shipment_details sd ON sd.id = t.reference_id AND t.transaction_type = 'inbound'
        LEFT JOIN users u_inbound ON u_inbound.id = sd.verified_by_user_id
        LEFT JOIN opening_stock_imports osi ON osi.id = t.reference_id AND t.transaction_type = 'opening_stock'
        LEFT JOIN users u_os ON u_os.id = osi.uploaded_by_user_id
-       WHERE t.warehouse_id = ? AND t.transaction_type IN ('inbound', 'opening_stock')
+       LEFT JOIN outbound_shipment_details osd ON osd.id = t.reference_id AND t.transaction_type = 'outbound'
+       LEFT JOIN users u_outbound ON u_outbound.id = osd.verified_by_user_id
+       WHERE t.warehouse_id = ? AND t.transaction_type IN ('inbound', 'opening_stock', 'outbound')
        ORDER BY t.created_at DESC`,
         )
           .bind(auth.context.warehouse_id)
@@ -3045,6 +3152,35 @@ export default {
               opening_stock_line_items: lineItems.results || [],
             };
           },
+          outbound: async () => {
+            const shipment = await env.DB.prepare(
+              `SELECT osd.*, u.username AS verified_by, cl.name AS client_name, cl.code AS client_code
+           FROM outbound_shipment_details osd
+           LEFT JOIN users u ON u.id = osd.verified_by_user_id
+           LEFT JOIN clients cl ON osd.client_id = cl.id
+           WHERE osd.id = ? AND osd.warehouse_id = ?`,
+            )
+              .bind(transaction.reference_id, auth.context.warehouse_id)
+              .first();
+
+            const lineItems = await env.DB.prepare(
+              "SELECT * FROM outbound_shipment_line_items WHERE outbound_shipment_detail_id = ? ORDER BY rowid ASC",
+            )
+              .bind(transaction.reference_id)
+              .all();
+
+            const pickingTasks = await env.DB.prepare(
+              "SELECT * FROM picking_tasks WHERE outbound_shipment_detail_id = ? ORDER BY created_at ASC",
+            )
+              .bind(transaction.reference_id)
+              .all();
+
+            return {
+              shipment_header: shipment || null,
+              outbound_shipment_line_items: lineItems.results,
+              picking_tasks: pickingTasks.results,
+            };
+          },
         };
 
         const loader = detailLoaders[transaction.transaction_type];
@@ -3065,6 +3201,766 @@ export default {
           status: 200,
           headers: { "Content-Type": "application/json", ...corsHeaders },
         });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+    }
+
+    // =========================================================================
+    // GET /api/outbound/pending -> AI-upload outbound shipments awaiting verification
+    // =========================================================================
+    if (request.method === "GET" && url.pathname === "/api/outbound/pending") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+
+      try {
+        const pending = await env.DB.prepare(
+          "SELECT id, status, created_at FROM outbound_shipments WHERE warehouse_id = ? AND status != 'completed' ORDER BY created_at DESC",
+        )
+          .bind(auth.context.warehouse_id)
+          .all();
+
+        return new Response(JSON.stringify({ shipments: pending.results }), {
+          status: 200,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: corsHeaders,
+        });
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/outbound/staged") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+
+      try {
+        const shipmentId = url.searchParams.get("id");
+        const shipment = await env.DB.prepare(
+          "SELECT id, status, staging_json FROM outbound_shipments WHERE id = ? AND warehouse_id = ?",
+        )
+          .bind(shipmentId, auth.context.warehouse_id)
+          .first();
+
+        if (!shipment) {
+          return new Response(
+            JSON.stringify({ error: "Outbound shipment not found." }),
+            { status: 404, headers: corsHeaders },
+          );
+        }
+
+        return new Response(
+          JSON.stringify({
+            id: shipment.id,
+            status: shipment.status,
+            staging: shipment.staging_json
+              ? JSON.parse(shipment.staging_json)
+              : null,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json", ...corsHeaders },
+          },
+        );
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: corsHeaders,
+        });
+      }
+    }
+
+    // =========================================================================
+    // POST /api/outbound/verify -> Validation-only. Never writes to the DB.
+    // Used by BOTH the AI-upload flow and Manual Entry (there is no separate
+    // manual-create endpoint — Manual Entry just posts a blank-form-filled
+    // payload here first).
+    // =========================================================================
+    if (request.method === "POST" && url.pathname === "/api/outbound/verify") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+
+      if (auth.context.role === "super_admin") {
+        return new Response(
+          JSON.stringify({
+            error:
+              "Operation Forbidden: Super Admins cannot verify outbound orders.",
+          }),
+          { status: 400, headers: corsHeaders },
+        );
+      }
+
+      try {
+        const payload = await request.json();
+        const { client_id, lineItems } = payload;
+        const errors = [];
+
+        if (!client_id) {
+          errors.push("Client is required.");
+        } else {
+          const clientRow = await env.DB.prepare(
+            "SELECT id FROM clients WHERE id = ? AND warehouse_id = ?",
+          )
+            .bind(client_id, auth.context.warehouse_id)
+            .first();
+          if (!clientRow)
+            errors.push("Selected client does not exist for this warehouse.");
+        }
+
+        if (!Array.isArray(lineItems) || lineItems.length === 0) {
+          errors.push("At least one line item is required.");
+        }
+
+        const allocationResults = [];
+
+        if (errors.length === 0 && Array.isArray(lineItems)) {
+          for (const item of lineItems) {
+            const stock_owner_id = item.stock_owner_id;
+            const item_code = String(item.item_code || "").trim();
+            const uom = String(item.uom || "").trim();
+            const requestedQty =
+              parseFloat(
+                String(item.requested_quantity || 0).replace(/,/g, ""),
+              ) || 0;
+
+            if (!stock_owner_id) {
+              errors.push(
+                `Line item '${item_code || "unknown"}': stock owner is required.`,
+              );
+              continue;
+            }
+            if (!item_code) {
+              errors.push("A line item is missing its item code.");
+              continue;
+            }
+            if (requestedQty <= 0) {
+              errors.push(
+                `Line item '${item_code}': requested quantity must be greater than zero.`,
+              );
+              continue;
+            }
+
+            const stockOwnerRow = await env.DB.prepare(
+              "SELECT id FROM stock_owners WHERE id = ? AND client_id = ? AND warehouse_id = ?",
+            )
+              .bind(stock_owner_id, client_id, auth.context.warehouse_id)
+              .first();
+            if (!stockOwnerRow) {
+              errors.push(
+                `Line item '${item_code}': stock owner does not belong to the selected client.`,
+              );
+              continue;
+            }
+
+            const { allocations, totalAllocated, shortfall } =
+              await allocateOutboundInventory(
+                env,
+                auth.context.warehouse_id,
+                stock_owner_id,
+                item_code,
+                uom,
+                requestedQty,
+              );
+
+            if (shortfall > 0.001) {
+              errors.push(
+                `Line item '${item_code}': insufficient available stock. Requested ${requestedQty} ${uom}, only ${totalAllocated} ${uom} available.`,
+              );
+            }
+
+            allocationResults.push({
+              item_code,
+              item_description: item.item_description || "",
+              stock_owner_id,
+              uom,
+              requested_quantity: requestedQty,
+              allocated_quantity: totalAllocated,
+              allocations,
+            });
+          }
+        }
+
+        if (errors.length > 0) {
+          return new Response(JSON.stringify({ success: false, errors }), {
+            status: 200,
+            headers: { "Content-Type": "application/json", ...corsHeaders },
+          });
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, allocations: allocationResults }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json", ...corsHeaders },
+          },
+        );
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+    }
+
+    // =========================================================================
+    // POST /api/outbound/commit -> All database writes happen here. Re-runs
+    // allocation fresh against current stock (does NOT trust the allocation
+    // the client received from /api/outbound/verify) so a race between two
+    // concurrent orders never oversells the same inventory.
+    // =========================================================================
+    if (request.method === "POST" && url.pathname === "/api/outbound/commit") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+
+      if (auth.context.role === "super_admin") {
+        return new Response(
+          JSON.stringify({
+            error:
+              "Operation Forbidden: Super Admins cannot execute outbound commits.",
+          }),
+          { status: 400, headers: corsHeaders },
+        );
+      }
+
+      try {
+        const payload = await request.json();
+        const { shipmentId, client_id, header, lineItems } = payload;
+
+        if (!client_id) {
+          return new Response(
+            JSON.stringify({
+              error: "Client ID must accompany the commit packet.",
+            }),
+            { status: 400, headers: corsHeaders },
+          );
+        }
+
+        const clientVerification = await env.DB.prepare(
+          "SELECT id FROM clients WHERE id = ? AND warehouse_id = ?",
+        )
+          .bind(client_id, auth.context.warehouse_id)
+          .first();
+
+        if (!clientVerification) {
+          return new Response(
+            JSON.stringify({
+              error: "Selected Client is invalid for this warehouse.",
+            }),
+            { status: 403, headers: corsHeaders },
+          );
+        }
+
+        if (!Array.isArray(lineItems) || lineItems.length === 0) {
+          return new Response(
+            JSON.stringify({
+              error: "At least one line item is required to commit.",
+            }),
+            { status: 400, headers: corsHeaders },
+          );
+        }
+
+        // AI-upload shipments carry a shipmentId that must belong to this warehouse.
+        // Manual Entry has no prior shipmentId, so this stays null and a fresh
+        // outbound_shipment_details.id is generated below.
+        if (shipmentId) {
+          const stagingVerification = await env.DB.prepare(
+            "SELECT id FROM outbound_shipments WHERE id = ? AND warehouse_id = ?",
+          )
+            .bind(shipmentId, auth.context.warehouse_id)
+            .first();
+          if (!stagingVerification) {
+            return new Response(
+              JSON.stringify({
+                error:
+                  "Unauthorized manipulation attempt detected. Record access denied.",
+              }),
+              { status: 403, headers: corsHeaders },
+            );
+          }
+        }
+
+        // Re-run allocation fresh, right now, against current stock — this is
+        // the authoritative check; whatever the client saw at Verify time is
+        // discarded.
+        const resolvedLineItems = [];
+        for (const item of lineItems) {
+          const stock_owner_id = item.stock_owner_id;
+          const item_code = String(item.item_code || "").trim();
+          const uom = String(item.uom || "").trim();
+          const requestedQty =
+            parseFloat(
+              String(item.requested_quantity || 0).replace(/,/g, ""),
+            ) || 0;
+
+          const stockOwnerRow = await env.DB.prepare(
+            "SELECT id FROM stock_owners WHERE id = ? AND client_id = ? AND warehouse_id = ?",
+          )
+            .bind(stock_owner_id, client_id, auth.context.warehouse_id)
+            .first();
+          if (!stockOwnerRow) {
+            return new Response(
+              JSON.stringify({
+                error: `Line item '${item_code}': stock owner does not belong to the selected client.`,
+              }),
+              { status: 403, headers: corsHeaders },
+            );
+          }
+
+          const { allocations, totalAllocated, shortfall } =
+            await allocateOutboundInventory(
+              env,
+              auth.context.warehouse_id,
+              stock_owner_id,
+              item_code,
+              uom,
+              requestedQty,
+            );
+
+          if (shortfall > 0.001) {
+            return new Response(
+              JSON.stringify({
+                error: `Stock changed since verification: '${item_code}' now only has ${totalAllocated} ${uom} available (requested ${requestedQty}). Please re-verify.`,
+              }),
+              { status: 409, headers: corsHeaders },
+            );
+          }
+
+          resolvedLineItems.push({
+            stock_owner_id,
+            item_code,
+            item_description: item.item_description || "Unknown Item",
+            uom,
+            requestedQty,
+            allocations,
+          });
+        }
+
+        const batchStatements = [];
+        const outboundDetailId = shipmentId || crypto.randomUUID();
+
+        batchStatements.push(
+          env.DB.prepare(
+            `INSERT INTO outbound_shipment_details
+              (id, warehouse_id, client_id, eway_bill_number, transporter_name, vehicle_number, status, created_by_user_id, verified_by_user_id)
+             VALUES (?, ?, ?, ?, ?, ?, 'pending_picking', ?, ?)`,
+          ).bind(
+            outboundDetailId,
+            auth.context.warehouse_id,
+            client_id,
+            String(header?.eway_bill_number || "").trim(),
+            String(header?.transporter_name || "").trim(),
+            String(header?.vehicle_number || "").trim(),
+            auth.context.user_id,
+            auth.context.user_id,
+          ),
+        );
+
+        const pickingTaskId = "pck_" + crypto.randomUUID();
+        batchStatements.push(
+          env.DB.prepare(
+            "INSERT INTO picking_tasks (id, warehouse_id, client_id, outbound_shipment_detail_id, status, created_by_user_id) VALUES (?, ?, ?, ?, 'pending', ?)",
+          ).bind(
+            pickingTaskId,
+            auth.context.warehouse_id,
+            client_id,
+            outboundDetailId,
+            auth.context.user_id,
+          ),
+        );
+
+        for (const resolved of resolvedLineItems) {
+          const lineItemId = crypto.randomUUID();
+          batchStatements.push(
+            env.DB.prepare(
+              `INSERT INTO outbound_shipment_line_items
+                (id, outbound_shipment_detail_id, stock_owner_id, item_code, item_description, uom, requested_quantity)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            ).bind(
+              lineItemId,
+              outboundDetailId,
+              resolved.stock_owner_id,
+              resolved.item_code,
+              resolved.item_description,
+              resolved.uom,
+              resolved.requestedQty,
+            ),
+          );
+
+          for (const alloc of resolved.allocations) {
+            batchStatements.push(
+              env.DB.prepare(
+                `INSERT INTO picking_task_items
+                  (id, picking_task_id, outbound_shipment_line_item_id, inventory_id, location_id, stock_owner_id, item_code, item_description, batch_number, expiry_date, uom, quantity_to_pick, status)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+              ).bind(
+                "pti_" + crypto.randomUUID(),
+                pickingTaskId,
+                lineItemId,
+                alloc.inventory_id,
+                alloc.location_id,
+                resolved.stock_owner_id,
+                resolved.item_code,
+                alloc.item_description || resolved.item_description,
+                alloc.batch_number,
+                alloc.expiry_date,
+                alloc.uom,
+                alloc.quantity,
+              ),
+            );
+
+            // Reserve the allocated quantity against the exact inventory row
+            batchStatements.push(
+              env.DB.prepare(
+                "UPDATE inventory SET reserved_quantity = reserved_quantity + ? WHERE id = ? AND warehouse_id = ?",
+              ).bind(
+                alloc.quantity,
+                alloc.inventory_id,
+                auth.context.warehouse_id,
+              ),
+            );
+          }
+        }
+
+        if (shipmentId) {
+          batchStatements.push(
+            env.DB.prepare(
+              "UPDATE outbound_shipments SET status = 'completed', staging_json = NULL WHERE id = ? AND warehouse_id = ?",
+            ).bind(shipmentId, auth.context.warehouse_id),
+          );
+        }
+
+        const transactionId = "txn_" + crypto.randomUUID();
+        batchStatements.push(
+          env.DB.prepare(
+            `INSERT INTO transactions (id, warehouse_id, transaction_type, reference_id, status, created_by_user_id, completed_by_user_id, completed_at, remarks, client_id)
+             VALUES (?, ?, 'outbound', ?, 'pending_picking', ?, NULL, NULL, NULL, ?)`,
+          ).bind(
+            transactionId,
+            auth.context.warehouse_id,
+            outboundDetailId,
+            auth.context.user_id,
+            client_id,
+          ),
+        );
+
+        await env.DB.batch(batchStatements);
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            message: "Outbound commit completed and picking task generated.",
+            outbound_shipment_detail_id: outboundDetailId,
+            picking_task_id: pickingTaskId,
+            transaction_id: transactionId,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json", ...corsHeaders },
+          },
+        );
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+    }
+
+    // =========================================================================
+    // GET /api/picking/pending & /api/picking/completed
+    // =========================================================================
+    if (request.method === "GET" && url.pathname === "/api/picking/pending") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+
+      try {
+        const tasks = await env.DB.prepare(
+          `SELECT pt.id, pt.status, pt.created_at, pt.client_id, c.name AS client_name, c.code AS client_code,
+                  osd.eway_bill_number, osd.vehicle_number, osd.transporter_name
+           FROM picking_tasks pt
+           LEFT JOIN clients c ON pt.client_id = c.id
+           LEFT JOIN outbound_shipment_details osd ON pt.outbound_shipment_detail_id = osd.id
+           WHERE pt.warehouse_id = ? AND pt.status = 'pending'
+           ORDER BY pt.created_at ASC`,
+        )
+          .bind(auth.context.warehouse_id)
+          .all();
+
+        const taskIds = tasks.results.map((t) => t.id);
+        let itemsByTask = {};
+        if (taskIds.length > 0) {
+          const placeholders = taskIds.map(() => "?").join(",");
+          const items = await env.DB.prepare(
+            `SELECT * FROM picking_task_items WHERE picking_task_id IN (${placeholders}) ORDER BY rowid ASC`,
+          )
+            .bind(...taskIds)
+            .all();
+          for (const item of items.results) {
+            if (!itemsByTask[item.picking_task_id])
+              itemsByTask[item.picking_task_id] = [];
+            itemsByTask[item.picking_task_id].push(item);
+          }
+        }
+
+        const enriched = tasks.results.map((t) => ({
+          ...t,
+          items: itemsByTask[t.id] || [],
+        }));
+
+        return new Response(JSON.stringify({ tasks: enriched }), {
+          status: 200,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: corsHeaders,
+        });
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/picking/completed") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+
+      try {
+        const tasks = await env.DB.prepare(
+          `SELECT pt.id, pt.status, pt.created_at, pt.completed_at, pt.client_id, c.name AS client_name, c.code AS client_code,
+                  osd.eway_bill_number, osd.vehicle_number, osd.transporter_name,
+                  u.username AS completed_by
+           FROM picking_tasks pt
+           LEFT JOIN clients c ON pt.client_id = c.id
+           LEFT JOIN outbound_shipment_details osd ON pt.outbound_shipment_detail_id = osd.id
+           LEFT JOIN users u ON pt.completed_by_user_id = u.id
+           WHERE pt.warehouse_id = ? AND pt.status = 'completed'
+           ORDER BY pt.completed_at DESC`,
+        )
+          .bind(auth.context.warehouse_id)
+          .all();
+
+        const taskIds = tasks.results.map((t) => t.id);
+        let itemsByTask = {};
+        if (taskIds.length > 0) {
+          const placeholders = taskIds.map(() => "?").join(",");
+          const items = await env.DB.prepare(
+            `SELECT * FROM picking_task_items WHERE picking_task_id IN (${placeholders}) ORDER BY rowid ASC`,
+          )
+            .bind(...taskIds)
+            .all();
+          for (const item of items.results) {
+            if (!itemsByTask[item.picking_task_id])
+              itemsByTask[item.picking_task_id] = [];
+            itemsByTask[item.picking_task_id].push(item);
+          }
+        }
+
+        const enriched = tasks.results.map((t) => ({
+          ...t,
+          items: itemsByTask[t.id] || [],
+        }));
+
+        return new Response(JSON.stringify({ tasks: enriched }), {
+          status: 200,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: corsHeaders,
+        });
+      }
+    }
+
+    // =========================================================================
+    // POST /api/picking/complete -> quantity -= picked_quantity, reserved_quantity -= picked_quantity.
+    // Never deletes inventory rows. Matches picking_task_items back to inventory
+    // via the stored inventory_id (no ambiguous re-matching on description fields).
+    // =========================================================================
+    if (request.method === "POST" && url.pathname === "/api/picking/complete") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+
+      if (auth.context.role === "viewer") {
+        return new Response(
+          JSON.stringify({
+            error:
+              "Operation Forbidden: Viewers cannot register physical warehouse stock actions.",
+          }),
+          { status: 403, headers: corsHeaders },
+        );
+      }
+
+      try {
+        const payload = await request.json();
+        const { picking_task_id, picked_items } = payload;
+
+        if (
+          !picking_task_id ||
+          !Array.isArray(picked_items) ||
+          picked_items.length === 0
+        ) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "Missing required inputs: picking_task_id and picked_items array are required.",
+            }),
+            { status: 400, headers: corsHeaders },
+          );
+        }
+
+        const originalTask = await env.DB.prepare(
+          "SELECT id, outbound_shipment_detail_id FROM picking_tasks WHERE id = ? AND warehouse_id = ? AND status = 'pending'",
+        )
+          .bind(picking_task_id, auth.context.warehouse_id)
+          .first();
+
+        if (!originalTask) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "Task not found or has already been closed by another operating user.",
+            }),
+            { status: 404, headers: corsHeaders },
+          );
+        }
+
+        const originalItems = await env.DB.prepare(
+          "SELECT id, inventory_id, quantity_to_pick FROM picking_task_items WHERE picking_task_id = ?",
+        )
+          .bind(picking_task_id)
+          .all();
+
+        const originalById = {};
+        for (const row of originalItems.results) originalById[row.id] = row;
+
+        const batchStatements = [];
+
+        for (const picked of picked_items) {
+          const original = originalById[picked.picking_task_item_id];
+          if (!original) {
+            return new Response(
+              JSON.stringify({
+                error: "Picked item does not belong to this picking task.",
+              }),
+              { status: 400, headers: corsHeaders },
+            );
+          }
+
+          const pickedQty =
+            parseFloat(
+              String(
+                picked.picked_quantity ?? original.quantity_to_pick,
+              ).replace(/,/g, ""),
+            ) || 0;
+          if (pickedQty <= 0 || pickedQty > original.quantity_to_pick + 0.001) {
+            return new Response(
+              JSON.stringify({
+                error: "Picked quantity is invalid for one of the line items.",
+              }),
+              { status: 400, headers: corsHeaders },
+            );
+          }
+
+          batchStatements.push(
+            env.DB.prepare(
+              "UPDATE inventory SET quantity = quantity - ?, reserved_quantity = reserved_quantity - ? WHERE id = ? AND warehouse_id = ?",
+            ).bind(
+              pickedQty,
+              pickedQty,
+              original.inventory_id,
+              auth.context.warehouse_id,
+            ),
+          );
+
+          batchStatements.push(
+            env.DB.prepare(
+              "UPDATE picking_task_items SET status = 'picked' WHERE id = ?",
+            ).bind(original.id),
+          );
+        }
+
+        batchStatements.push(
+          env.DB.prepare(
+            "UPDATE picking_tasks SET status = 'completed', completed_by_user_id = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ? AND warehouse_id = ?",
+          ).bind(
+            auth.context.user_id,
+            picking_task_id,
+            auth.context.warehouse_id,
+          ),
+        );
+
+        batchStatements.push(
+          env.DB.prepare(
+            "UPDATE outbound_shipment_details SET status = 'completed' WHERE id = ? AND warehouse_id = ?",
+          ).bind(
+            originalTask.outbound_shipment_detail_id,
+            auth.context.warehouse_id,
+          ),
+        );
+
+        batchStatements.push(
+          env.DB.prepare(
+            `UPDATE transactions SET status = 'completed', completed_by_user_id = ?, completed_at = CURRENT_TIMESTAMP
+             WHERE transaction_type = 'outbound' AND reference_id = ? AND warehouse_id = ?`,
+          ).bind(
+            auth.context.user_id,
+            originalTask.outbound_shipment_detail_id,
+            auth.context.warehouse_id,
+          ),
+        );
+
+        await env.DB.batch(batchStatements);
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            message: "Picking completed successfully. Balances up to date.",
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json", ...corsHeaders },
+          },
+        );
       } catch (err) {
         return new Response(JSON.stringify({ error: err.message }), {
           status: 500,
@@ -3401,6 +4297,15 @@ Return your output as markdown`;
 // ==========================================
 async function handleLlmDispatch(body, env) {
   const { pageId, markdown, shipmentId, documentType } = body;
+  const shipmentType =
+    body.shipmentType === "outbound" ? "outbound" : "inbound";
+
+  if (shipmentType === "outbound") {
+    return handleOutboundLlmDispatch(
+      { pageId, markdown, shipmentId, documentType },
+      env,
+    );
+  }
 
   const SYSTEM_PROMPT = `Convert this OCR markdown into a clean, structured JSON object adhering exactly to the schema blueprint defined below.
 
@@ -3546,6 +4451,220 @@ additional_data:
   if (shipmentPages.every((p) => p.llm_status === "completed")) {
     await aggregateShipmentData(shipmentId, env);
   }
+}
+
+// ==========================================
+// OUTBOUND LLM DISPATCH — called by handleLlmDispatch() when shipmentType === 'outbound'
+// Reuses the same OCR markdown + OpenRouter call pattern as the inbound path,
+// with an outbound-specific extraction schema (dispatch/delivery order rather
+// than a tax invoice), and aggregates via aggregateOutboundShipmentData().
+// ==========================================
+async function handleOutboundLlmDispatch(body, env) {
+  const { pageId, markdown, shipmentId, documentType } = body;
+
+  const OUTBOUND_SYSTEM_PROMPT = `Convert this OCR markdown of an outbound dispatch document into a clean, structured JSON object adhering exactly to the schema blueprint defined below.
+
+GENERAL RULES:
+- Do not include any terms and conditions or legal declarations.
+- Include all text values exactly as worded in the source. Do not summarize or omit.
+- All keys must be lowercase_snake_case without exception, regardless of how the source document labels the field.
+- Return only a single valid JSON block without any explanatory dialogue.
+
+CANONICAL SCHEMA BLUEPRINT:
+{
+  "eway_bill_number": "",
+  "transporter_name": "",
+  "vehicle_number": "",
+  "client_name": "",
+  "line_items": [
+    {
+      "item_code": "",
+      "item_description": "",
+      "requested_quantity": "",
+      "uom": ""
+    }
+  ]
+}
+
+FIELD-SPECIFIC ENFORCEMENT RULES:
+
+eway_bill_number:
+- the e way bill number is exactly 12 digit numeric code so dont extract any other number as e way bill number.
+
+line_items:
+- requested_quantity: Must be a clean numeric integer/float string. Strip away any unit noise (e.g. "50 CS" -> "50").
+- uom: Extract the clean Unit of Measure text (e.g., "CS", "CARTONS", "EA", "KG").`;
+
+  const payload = {
+    model: env.MODEL,
+    messages: [
+      { role: "system", content: OUTBOUND_SYSTEM_PROMPT },
+      { role: "user", content: markdown },
+    ],
+    temperature: 0.0,
+    max_tokens: 8192,
+    response_format: { type: "json_object" },
+    provider: {
+      order: ["Groq"],
+      allow_fallbacks: false,
+    },
+  };
+
+  const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => "");
+    throw new Error(`OpenRouter LLM call failed: ${resp.status} ${errText}`);
+  }
+
+  const result = await resp.json();
+  const rawContent = result.choices?.[0]?.message?.content;
+
+  if (!rawContent) {
+    await env.DB.prepare(
+      "UPDATE document_pages SET llm_status = 'failed' WHERE id = ?",
+    )
+      .bind(pageId)
+      .run();
+    return;
+  }
+
+  await env.DB.prepare(
+    "UPDATE document_pages SET raw_extracted_json = ?, llm_status = 'completed' WHERE id = ?",
+  )
+    .bind(rawContent, pageId)
+    .run();
+
+  const { results: shipmentPages } = await env.DB.prepare(
+    "SELECT id, llm_status FROM document_pages WHERE shipment_id = ? AND shipment_type = 'outbound'",
+  )
+    .bind(shipmentId)
+    .all();
+
+  if (shipmentPages.every((p) => p.llm_status === "completed")) {
+    await aggregateOutboundShipmentData(shipmentId, env);
+  }
+}
+
+// ===========================================================================
+// SHARED OUTBOUND ALLOCATION ENGINE — used by both /api/outbound/verify and
+// /api/outbound/commit so Commit always recomputes allocation against
+// current stock rather than trusting whatever Verify returned earlier.
+// FEFO (earliest expiry first) when expiry_date is present, otherwise FIFO
+// (oldest created_at first). Read-only: callers decide whether to write.
+// ===========================================================================
+async function allocateOutboundInventory(
+  env,
+  warehouse_id,
+  stock_owner_id,
+  item_code,
+  uom,
+  requestedQty,
+) {
+  const { results: candidateRows } = await env.DB.prepare(
+    `SELECT id, location_id, item_code, item_description, uom, batch_number, expiry_date,
+            (quantity - reserved_quantity) AS available_quantity
+     FROM inventory
+     WHERE warehouse_id = ? AND stock_owner_id = ? AND item_code = ?
+       AND (quantity - reserved_quantity) > 0
+     ORDER BY (expiry_date IS NULL) ASC, expiry_date ASC, created_at ASC`,
+  )
+    .bind(warehouse_id, stock_owner_id, item_code)
+    .all();
+
+  const allocations = [];
+  let remaining = requestedQty;
+
+  for (const row of candidateRows) {
+    if (remaining <= 0) break;
+    if (row.uom !== uom) continue; // UOM mismatch: skip, surfaced as a shortfall to the caller
+    const take = Math.min(remaining, row.available_quantity);
+    if (take <= 0) continue;
+    allocations.push({
+      inventory_id: row.id,
+      location_id: row.location_id,
+      item_description: row.item_description,
+      batch_number: row.batch_number,
+      expiry_date: row.expiry_date,
+      uom: row.uom,
+      quantity: take,
+    });
+    remaining -= take;
+  }
+
+  return {
+    allocations,
+    totalAllocated: requestedQty - remaining,
+    shortfall: remaining,
+  };
+}
+
+// ===========================================================================
+// OUTBOUND AGGREGATION MODULE — separate from aggregateShipmentData().
+// Outbound documents are a single dispatch/delivery order rather than a
+// multi-document waterfall, so this just merges pages in order without the
+// inbound doc-type priority logic.
+// ===========================================================================
+async function aggregateOutboundShipmentData(shipmentId, env) {
+  const { results } = await env.DB.prepare(
+    "SELECT raw_extracted_json FROM document_pages WHERE shipment_id = ? AND shipment_type = 'outbound' AND llm_status = 'completed'",
+  )
+    .bind(shipmentId)
+    .all();
+
+  const parsedPages = [];
+  results.forEach((row) => {
+    if (!row.raw_extracted_json) return;
+    try {
+      parsedPages.push(JSON.parse(row.raw_extracted_json));
+    } catch (e) {}
+  });
+
+  const resolveField = (fieldName) => {
+    for (const data of parsedPages) {
+      if (data && data[fieldName] !== undefined && data[fieldName] !== null) {
+        const strVal = String(data[fieldName]).trim();
+        if (strVal !== "") return strVal;
+      }
+    }
+    return "";
+  };
+
+  let targetedLineItemsArray = [];
+  for (const data of parsedPages) {
+    if (data && Array.isArray(data.line_items) && data.line_items.length > 0) {
+      targetedLineItemsArray.push(...data.line_items);
+    }
+  }
+
+  const completeStagingManifest = {
+    header: {
+      eway_bill_number: resolveField("eway_bill_number"),
+      transporter_name: resolveField("transporter_name"),
+      vehicle_number: resolveField("vehicle_number"),
+      client_name: resolveField("client_name"),
+    },
+    lineItems: targetedLineItemsArray.map((item) => ({
+      item_code: String(item.item_code || "").trim(),
+      item_description: item.item_description || "",
+      requested_quantity:
+        parseFloat(String(item.requested_quantity || 0).replace(/,/g, "")) || 0,
+      uom: item.uom || "PCS",
+    })),
+  };
+
+  await env.DB.prepare(
+    "UPDATE outbound_shipments SET staging_json = ?, status = 'pending_verification' WHERE id = ?",
+  )
+    .bind(JSON.stringify(completeStagingManifest), shipmentId)
+    .run();
 }
 
 // ==========================================

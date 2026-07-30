@@ -12,6 +12,7 @@ CREATE TABLE inventory (
     item_code TEXT NOT NULL,
     item_description TEXT NOT NULL,
     quantity REAL NOT NULL,
+    reserved_quantity REAL NOT NULL DEFAULT 0, -- units allocated to pending picking tasks; available = quantity - reserved_quantity
     uom TEXT NOT NULL,
     category TEXT NOT NULL,
     manufacturing_date TEXT,
