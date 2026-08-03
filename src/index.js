@@ -450,6 +450,37 @@ async function generateCloudinarySignature(publicId, timestamp, apiSecret) {
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// 1b. Cloudinary asset deletion — used by Billing attachment cleanup. Reuses
+// generateCloudinarySignature() since /destroy's signed params (public_id +
+// timestamp) are identical in shape to /upload's.
+async function destroyCloudinaryAsset(publicId, resourceType, env) {
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const signature = await generateCloudinarySignature(
+    publicId,
+    timestamp,
+    env.CLOUDINARY_API_SECRET,
+  );
+
+  const destroyFormData = new FormData();
+  destroyFormData.append("public_id", publicId);
+  destroyFormData.append("timestamp", timestamp);
+  destroyFormData.append("api_key", env.CLOUDINARY_API_KEY);
+  destroyFormData.append("signature", signature);
+
+  const resp = await fetch(
+    `https://api.cloudinary.com/v1_1/${env.CLOUDINARY_CLOUD_NAME}/${resourceType || "raw"}/destroy`,
+    { method: "POST", body: destroyFormData },
+  );
+  const result = await resp.json();
+  if (
+    !resp.ok ||
+    (result.result && result.result !== "ok" && result.result !== "not found")
+  ) {
+    throw new Error(result.error?.message || "Cloudinary destroy failed");
+  }
+  return result;
+}
+
 // 2. Comprehensive CORS headers
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -491,8 +522,14 @@ export default {
       }
 
       try {
-        const { company_name, initial_status, admin_username, admin_password } =
-          await request.json();
+        const {
+          company_name,
+          initial_status,
+          admin_username,
+          admin_password,
+          gstin,
+          address,
+        } = await request.json();
 
         // Validate inputs (status can be 'active' or 'trial')
         if (!company_name || !admin_username || !admin_password) {
@@ -513,15 +550,23 @@ export default {
         // FIXED: Changed adminPassword to admin_password to match the destructured variable above
         const adminPasswordHash = await hashPassword(admin_password);
         const subscriptionMode = initial_status || "trial";
+        const gstinValue = gstin ? String(gstin).trim().toUpperCase() : null;
+        const addressValue = address ? String(address).trim() : null;
 
         // Batch statement ensures BOTH the warehouse entry and its master account insert together perfectly
         await env.DB.batch([
           env.DB.prepare(
             `
-            INSERT INTO warehouses (id, company_name, subscription_status)
-            VALUES (?, ?, ?)
+            INSERT INTO warehouses (id, company_name, gstin, address, subscription_status)
+            VALUES (?, ?, ?, ?, ?)
           `,
-          ).bind(warehouseId, company_name, subscriptionMode),
+          ).bind(
+            warehouseId,
+            company_name,
+            gstinValue,
+            addressValue,
+            subscriptionMode,
+          ),
 
           env.DB.prepare(
             `
@@ -667,7 +712,7 @@ export default {
       try {
         // Query the D1 database for all registered tenant structures
         const rows = await env.DB.prepare(
-          `SELECT id, company_name, subscription_status, created_at FROM warehouses ORDER BY created_at DESC`,
+          `SELECT id, company_name, gstin, address, subscription_status, created_at FROM warehouses ORDER BY created_at DESC`,
         ).all();
 
         // Cloudflare D1 returns rows under the '.results' array property
@@ -709,10 +754,10 @@ export default {
           );
         }
 
-        // LOOKUP UPDATE: Added w.company_name to extract the warehouse name
+        // LOOKUP UPDATE: Added w.company_name, w.gstin, w.address (used on billing invoices) to extract the warehouse profile
         const userRow = await env.DB.prepare(
           `
-          SELECT u.id, u.username, u.password_hash, u.role, u.is_active, u.warehouse_id, w.subscription_status, w.company_name
+          SELECT u.id, u.username, u.password_hash, u.role, u.is_active, u.warehouse_id, w.subscription_status, w.company_name, w.gstin, w.address
           FROM users u
           LEFT JOIN warehouses w ON u.warehouse_id = w.id
           WHERE u.username = ?
@@ -793,6 +838,8 @@ export default {
               role: userRow.role,
               warehouse_id: userRow.warehouse_id,
               company_name: userRow.company_name, // Handed down cleanly to app.js local storage
+              gstin: userRow.gstin, // Warehouse GSTIN, used when generating billing invoices client-side
+              address: userRow.address, // Warehouse address, used when generating billing invoices client-side
             },
           }),
           {
@@ -3994,6 +4041,808 @@ export default {
         return new Response(JSON.stringify({ error: err.message }), {
           status: 500,
           headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+    }
+
+    // =========================================================================
+    // BILLING MODULE — manual invoice creation. No automatic calculation of
+    // any kind; every numeric field is entered and trusted as-is from the
+    // client. status is binary: 'pending' -> 'paid' (one-way, via mark-paid).
+    // =========================================================================
+
+    // -------------------------------------------------------------------------
+    // GET /api/billing -> List bills for this warehouse (filters: search, client_id, status)
+    // -------------------------------------------------------------------------
+    if (request.method === "GET" && url.pathname === "/api/billing") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+      if (auth.context.role !== "admin") {
+        return new Response(
+          JSON.stringify({
+            error: "Operation Forbidden: Admin access required.",
+          }),
+          { status: 403, headers: corsHeaders },
+        );
+      }
+
+      try {
+        const search = (url.searchParams.get("search") || "").trim();
+        const clientId = url.searchParams.get("client_id") || "";
+        const status = url.searchParams.get("status") || "";
+
+        let query = `
+          SELECT b.*, c.name AS client_name, c.code AS client_code
+          FROM billing b
+          JOIN clients c ON b.client_id = c.id
+          WHERE b.warehouse_id = ?
+        `;
+        const binds = [auth.context.warehouse_id];
+
+        if (search) {
+          query += " AND (b.bill_number LIKE ? OR c.name LIKE ?)";
+          binds.push(`%${search}%`, `%${search}%`);
+        }
+        if (clientId) {
+          query += " AND b.client_id = ?";
+          binds.push(clientId);
+        }
+        if (status === "pending" || status === "paid") {
+          query += " AND b.status = ?";
+          binds.push(status);
+        }
+        query += " ORDER BY b.created_at DESC";
+
+        const rows = await env.DB.prepare(query)
+          .bind(...binds)
+          .all();
+        return new Response(JSON.stringify({ bills: rows.results || [] }), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // POST /api/billing -> Create a new bill (status always starts 'pending')
+    // -------------------------------------------------------------------------
+    if (request.method === "POST" && url.pathname === "/api/billing") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+      if (auth.context.role !== "admin") {
+        return new Response(
+          JSON.stringify({
+            error: "Operation Forbidden: Admin access required.",
+          }),
+          { status: 403, headers: corsHeaders },
+        );
+      }
+
+      try {
+        const payload = await request.json();
+        const client_id = String(payload.client_id || "").trim();
+        const bill_number = String(payload.bill_number || "").trim();
+        const invoice_date = String(payload.invoice_date || "").trim();
+        const due_date = payload.due_date
+          ? String(payload.due_date).trim()
+          : null;
+        const billing_period_from = payload.billing_period_from
+          ? String(payload.billing_period_from).trim()
+          : null;
+        const billing_period_to = payload.billing_period_to
+          ? String(payload.billing_period_to).trim()
+          : null;
+        const reference_number = payload.reference_number
+          ? String(payload.reference_number).trim()
+          : null;
+        const subtotal = Number(payload.subtotal) || 0;
+        const tax = Number(payload.tax) || 0;
+        const discount = Number(payload.discount) || 0;
+        const other_charges = Number(payload.other_charges) || 0;
+        const grand_total = Number(payload.grand_total) || 0;
+        const notes = payload.notes ? String(payload.notes).trim() : null;
+        const items = Array.isArray(payload.items) ? payload.items : [];
+
+        if (!client_id || !bill_number || !invoice_date) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "Client, Bill Number, and Invoice Date are mandatory fields.",
+            }),
+            { status: 400, headers: corsHeaders },
+          );
+        }
+        if (items.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "At least one billing item is required." }),
+            { status: 400, headers: corsHeaders },
+          );
+        }
+
+        // Confirm the client belongs to this warehouse
+        const clientRow = await env.DB.prepare(
+          "SELECT id FROM clients WHERE id = ? AND warehouse_id = ?",
+        )
+          .bind(client_id, auth.context.warehouse_id)
+          .first();
+        if (!clientRow) {
+          return new Response(
+            JSON.stringify({
+              error: "Selected client was not found in this warehouse.",
+            }),
+            { status: 400, headers: corsHeaders },
+          );
+        }
+
+        // Duplicate bill number check within this warehouse
+        const existingBill = await env.DB.prepare(
+          "SELECT id FROM billing WHERE warehouse_id = ? AND bill_number = ?",
+        )
+          .bind(auth.context.warehouse_id, bill_number)
+          .first();
+        if (existingBill) {
+          return new Response(
+            JSON.stringify({
+              error: `Bill Number '${bill_number}' is already in use in this warehouse. Please use a different Bill Number.`,
+            }),
+            { status: 409, headers: corsHeaders },
+          );
+        }
+
+        const billingId = "bill_" + crypto.randomUUID();
+
+        const batchStatements = [
+          env.DB.prepare(
+            `INSERT INTO billing (
+              id, warehouse_id, client_id, bill_number, invoice_date, due_date,
+              billing_period_from, billing_period_to, reference_number,
+              subtotal, tax, discount, other_charges, grand_total, notes,
+              status, created_by_user_id, updated_by_user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL)`,
+          ).bind(
+            billingId,
+            auth.context.warehouse_id,
+            client_id,
+            bill_number,
+            invoice_date,
+            due_date,
+            billing_period_from,
+            billing_period_to,
+            reference_number,
+            subtotal,
+            tax,
+            discount,
+            other_charges,
+            grand_total,
+            notes,
+            auth.context.user_id,
+          ),
+        ];
+
+        items.forEach((item) => {
+          const itemId = "bit_" + crypto.randomUUID();
+          batchStatements.push(
+            env.DB.prepare(
+              `INSERT INTO billing_items (id, billing_id, description, quantity, unit, rate, amount)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            ).bind(
+              itemId,
+              billingId,
+              String(item.description || "").trim(),
+              item.quantity !== undefined && item.quantity !== ""
+                ? Number(item.quantity)
+                : null,
+              item.unit ? String(item.unit).trim() : null,
+              item.rate !== undefined && item.rate !== ""
+                ? Number(item.rate)
+                : null,
+              item.amount !== undefined && item.amount !== ""
+                ? Number(item.amount)
+                : null,
+            ),
+          );
+        });
+
+        await env.DB.batch(batchStatements);
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            message: "Bill created successfully.",
+            billing_id: billingId,
+          }),
+          {
+            status: 201,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // POST /api/billing/:id/attachments -> Upload one supporting file to Cloudinary
+    // -------------------------------------------------------------------------
+    const billingAttachmentUploadMatch = url.pathname.match(
+      /^\/api\/billing\/([^/]+)\/attachments$/,
+    );
+    if (request.method === "POST" && billingAttachmentUploadMatch) {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+      if (auth.context.role !== "admin") {
+        return new Response(
+          JSON.stringify({
+            error: "Operation Forbidden: Admin access required.",
+          }),
+          { status: 403, headers: corsHeaders },
+        );
+      }
+
+      try {
+        const billingId = billingAttachmentUploadMatch[1];
+        const billRow = await env.DB.prepare(
+          "SELECT id FROM billing WHERE id = ? AND warehouse_id = ?",
+        )
+          .bind(billingId, auth.context.warehouse_id)
+          .first();
+        if (!billRow) {
+          return new Response(JSON.stringify({ error: "Bill not found." }), {
+            status: 404,
+            headers: corsHeaders,
+          });
+        }
+
+        const formData = await request.formData();
+        const file = formData.get("file");
+        if (!file) {
+          return new Response(JSON.stringify({ error: "No file provided." }), {
+            status: 400,
+            headers: corsHeaders,
+          });
+        }
+
+        const isImage = (file.type || "").startsWith("image/");
+        const resourceType = isImage ? "image" : "raw";
+        const attachmentId = "att_" + crypto.randomUUID();
+        const publicId = `billing_attachments/${billingId}_${attachmentId}`;
+        const timestamp = Math.floor(Date.now() / 1000).toString();
+        const signature = await generateCloudinarySignature(
+          publicId,
+          timestamp,
+          env.CLOUDINARY_API_SECRET,
+        );
+
+        const cloudinaryFormData = new FormData();
+        cloudinaryFormData.append("file", file);
+        cloudinaryFormData.append("public_id", publicId);
+        cloudinaryFormData.append("timestamp", timestamp);
+        cloudinaryFormData.append("api_key", env.CLOUDINARY_API_KEY);
+        cloudinaryFormData.append("signature", signature);
+
+        const cloudResponse = await fetch(
+          `https://api.cloudinary.com/v1_1/${env.CLOUDINARY_CLOUD_NAME}/${resourceType}/upload`,
+          { method: "POST", body: cloudinaryFormData },
+        );
+        const cloudResult = await cloudResponse.json();
+        if (!cloudResponse.ok) {
+          throw new Error(
+            cloudResult.error?.message || "Cloudinary upload failed",
+          );
+        }
+
+        await env.DB.prepare(
+          `INSERT INTO billing_attachments (id, billing_id, file_name, file_url, cloudinary_public_id, cloudinary_resource_type)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+          .bind(
+            attachmentId,
+            billingId,
+            file.name || "attachment",
+            cloudResult.secure_url,
+            publicId,
+            resourceType,
+          )
+          .run();
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            attachment: {
+              id: attachmentId,
+              file_name: file.name || "attachment",
+              file_url: cloudResult.secure_url,
+            },
+          }),
+          {
+            status: 201,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // DELETE /api/billing/attachments/:id -> Remove one attachment (Cloudinary + DB)
+    // -------------------------------------------------------------------------
+    const billingAttachmentDeleteMatch = url.pathname.match(
+      /^\/api\/billing\/attachments\/([^/]+)$/,
+    );
+    if (request.method === "DELETE" && billingAttachmentDeleteMatch) {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+      if (auth.context.role !== "admin") {
+        return new Response(
+          JSON.stringify({
+            error: "Operation Forbidden: Admin access required.",
+          }),
+          { status: 403, headers: corsHeaders },
+        );
+      }
+
+      try {
+        const attachmentId = billingAttachmentDeleteMatch[1];
+        const attachmentRow = await env.DB.prepare(
+          `SELECT a.id, a.cloudinary_public_id, a.cloudinary_resource_type
+           FROM billing_attachments a
+           JOIN billing b ON a.billing_id = b.id
+           WHERE a.id = ? AND b.warehouse_id = ?`,
+        )
+          .bind(attachmentId, auth.context.warehouse_id)
+          .first();
+
+        if (!attachmentRow) {
+          return new Response(
+            JSON.stringify({ error: "Attachment not found." }),
+            {
+              status: 404,
+              headers: corsHeaders,
+            },
+          );
+        }
+
+        await destroyCloudinaryAsset(
+          attachmentRow.cloudinary_public_id,
+          attachmentRow.cloudinary_resource_type,
+          env,
+        );
+
+        await env.DB.prepare("DELETE FROM billing_attachments WHERE id = ?")
+          .bind(attachmentId)
+          .run();
+
+        return new Response(JSON.stringify({ success: true }), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // POST /api/billing/:id/mark-paid -> One-way status transition, pending -> paid
+    // -------------------------------------------------------------------------
+    const billingMarkPaidMatch = url.pathname.match(
+      /^\/api\/billing\/([^/]+)\/mark-paid$/,
+    );
+    if (request.method === "POST" && billingMarkPaidMatch) {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+      if (auth.context.role !== "admin") {
+        return new Response(
+          JSON.stringify({
+            error: "Operation Forbidden: Admin access required.",
+          }),
+          { status: 403, headers: corsHeaders },
+        );
+      }
+
+      try {
+        const billingId = billingMarkPaidMatch[1];
+        const billRow = await env.DB.prepare(
+          "SELECT id, status FROM billing WHERE id = ? AND warehouse_id = ?",
+        )
+          .bind(billingId, auth.context.warehouse_id)
+          .first();
+
+        if (!billRow) {
+          return new Response(JSON.stringify({ error: "Bill not found." }), {
+            status: 404,
+            headers: corsHeaders,
+          });
+        }
+        if (billRow.status === "paid") {
+          return new Response(
+            JSON.stringify({ error: "This bill is already marked as paid." }),
+            { status: 400, headers: corsHeaders },
+          );
+        }
+
+        await env.DB.prepare(
+          "UPDATE billing SET status = 'paid', updated_by_user_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        )
+          .bind(auth.context.user_id, billingId)
+          .run();
+
+        return new Response(
+          JSON.stringify({ success: true, message: "Bill marked as paid." }),
+          {
+            status: 200,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // GET /api/billing/:id -> Bill details, with items and attachments joined in
+    // PUT /api/billing/:id -> Edit a bill (only while status = 'pending')
+    // DELETE /api/billing/:id -> Delete a bill (only while status = 'pending')
+    // -------------------------------------------------------------------------
+    const billingDetailMatch = url.pathname.match(/^\/api\/billing\/([^/]+)$/);
+
+    if (request.method === "GET" && billingDetailMatch) {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+      if (auth.context.role !== "admin") {
+        return new Response(
+          JSON.stringify({
+            error: "Operation Forbidden: Admin access required.",
+          }),
+          { status: 403, headers: corsHeaders },
+        );
+      }
+
+      try {
+        const billingId = billingDetailMatch[1];
+        const bill = await env.DB.prepare(
+          `SELECT b.*, c.name AS client_name, c.code AS client_code, c.gstin AS client_gstin,
+                  c.contact_person AS client_contact_person, c.phone AS client_phone, c.email AS client_email
+           FROM billing b
+           JOIN clients c ON b.client_id = c.id
+           WHERE b.id = ? AND b.warehouse_id = ?`,
+        )
+          .bind(billingId, auth.context.warehouse_id)
+          .first();
+
+        if (!bill) {
+          return new Response(JSON.stringify({ error: "Bill not found." }), {
+            status: 404,
+            headers: corsHeaders,
+          });
+        }
+
+        const items = await env.DB.prepare(
+          "SELECT id, description, quantity, unit, rate, amount FROM billing_items WHERE billing_id = ? ORDER BY created_at ASC",
+        )
+          .bind(billingId)
+          .all();
+
+        const attachments = await env.DB.prepare(
+          "SELECT id, file_name, file_url, created_at FROM billing_attachments WHERE billing_id = ? ORDER BY created_at ASC",
+        )
+          .bind(billingId)
+          .all();
+
+        return new Response(
+          JSON.stringify({
+            bill,
+            items: items.results || [],
+            attachments: attachments.results || [],
+          }),
+          {
+            status: 200,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    if (request.method === "PUT" && billingDetailMatch) {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+      if (auth.context.role !== "admin") {
+        return new Response(
+          JSON.stringify({
+            error: "Operation Forbidden: Admin access required.",
+          }),
+          { status: 403, headers: corsHeaders },
+        );
+      }
+
+      try {
+        const billingId = billingDetailMatch[1];
+        const existingBill = await env.DB.prepare(
+          "SELECT id, status, bill_number FROM billing WHERE id = ? AND warehouse_id = ?",
+        )
+          .bind(billingId, auth.context.warehouse_id)
+          .first();
+
+        if (!existingBill) {
+          return new Response(JSON.stringify({ error: "Bill not found." }), {
+            status: 404,
+            headers: corsHeaders,
+          });
+        }
+        if (existingBill.status === "paid") {
+          return new Response(
+            JSON.stringify({
+              error: "This bill has been paid and can no longer be edited.",
+            }),
+            { status: 403, headers: corsHeaders },
+          );
+        }
+
+        const payload = await request.json();
+        const client_id = String(payload.client_id || "").trim();
+        const bill_number = String(payload.bill_number || "").trim();
+        const invoice_date = String(payload.invoice_date || "").trim();
+        const due_date = payload.due_date
+          ? String(payload.due_date).trim()
+          : null;
+        const billing_period_from = payload.billing_period_from
+          ? String(payload.billing_period_from).trim()
+          : null;
+        const billing_period_to = payload.billing_period_to
+          ? String(payload.billing_period_to).trim()
+          : null;
+        const reference_number = payload.reference_number
+          ? String(payload.reference_number).trim()
+          : null;
+        const subtotal = Number(payload.subtotal) || 0;
+        const tax = Number(payload.tax) || 0;
+        const discount = Number(payload.discount) || 0;
+        const other_charges = Number(payload.other_charges) || 0;
+        const grand_total = Number(payload.grand_total) || 0;
+        const notes = payload.notes ? String(payload.notes).trim() : null;
+        const items = Array.isArray(payload.items) ? payload.items : [];
+
+        if (!client_id || !bill_number || !invoice_date) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "Client, Bill Number, and Invoice Date are mandatory fields.",
+            }),
+            { status: 400, headers: corsHeaders },
+          );
+        }
+        if (items.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "At least one billing item is required." }),
+            { status: 400, headers: corsHeaders },
+          );
+        }
+
+        // Duplicate bill number check, excluding this bill itself
+        if (bill_number !== existingBill.bill_number) {
+          const duplicateBill = await env.DB.prepare(
+            "SELECT id FROM billing WHERE warehouse_id = ? AND bill_number = ? AND id != ?",
+          )
+            .bind(auth.context.warehouse_id, bill_number, billingId)
+            .first();
+          if (duplicateBill) {
+            return new Response(
+              JSON.stringify({
+                error: `Bill Number '${bill_number}' is already in use in this warehouse. Please use a different Bill Number.`,
+              }),
+              { status: 409, headers: corsHeaders },
+            );
+          }
+        }
+
+        const batchStatements = [
+          env.DB.prepare(
+            `UPDATE billing SET
+              client_id = ?, bill_number = ?, invoice_date = ?, due_date = ?,
+              billing_period_from = ?, billing_period_to = ?, reference_number = ?,
+              subtotal = ?, tax = ?, discount = ?, other_charges = ?, grand_total = ?,
+              notes = ?, updated_by_user_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?`,
+          ).bind(
+            client_id,
+            bill_number,
+            invoice_date,
+            due_date,
+            billing_period_from,
+            billing_period_to,
+            reference_number,
+            subtotal,
+            tax,
+            discount,
+            other_charges,
+            grand_total,
+            notes,
+            auth.context.user_id,
+            billingId,
+          ),
+          // Simplest reliable way to sync line items without an ordering column: wipe and re-insert
+          env.DB.prepare("DELETE FROM billing_items WHERE billing_id = ?").bind(
+            billingId,
+          ),
+        ];
+
+        items.forEach((item) => {
+          const itemId = "bit_" + crypto.randomUUID();
+          batchStatements.push(
+            env.DB.prepare(
+              `INSERT INTO billing_items (id, billing_id, description, quantity, unit, rate, amount)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            ).bind(
+              itemId,
+              billingId,
+              String(item.description || "").trim(),
+              item.quantity !== undefined && item.quantity !== ""
+                ? Number(item.quantity)
+                : null,
+              item.unit ? String(item.unit).trim() : null,
+              item.rate !== undefined && item.rate !== ""
+                ? Number(item.rate)
+                : null,
+              item.amount !== undefined && item.amount !== ""
+                ? Number(item.amount)
+                : null,
+            ),
+          );
+        });
+
+        await env.DB.batch(batchStatements);
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            message: "Bill updated successfully.",
+          }),
+          {
+            status: 200,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    if (request.method === "DELETE" && billingDetailMatch) {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+      if (auth.context.role !== "admin") {
+        return new Response(
+          JSON.stringify({
+            error: "Operation Forbidden: Admin access required.",
+          }),
+          { status: 403, headers: corsHeaders },
+        );
+      }
+
+      try {
+        const billingId = billingDetailMatch[1];
+        const existingBill = await env.DB.prepare(
+          "SELECT id, status FROM billing WHERE id = ? AND warehouse_id = ?",
+        )
+          .bind(billingId, auth.context.warehouse_id)
+          .first();
+
+        if (!existingBill) {
+          return new Response(JSON.stringify({ error: "Bill not found." }), {
+            status: 404,
+            headers: corsHeaders,
+          });
+        }
+        if (existingBill.status === "paid") {
+          return new Response(
+            JSON.stringify({
+              error: "This bill has been paid and can no longer be deleted.",
+            }),
+            { status: 403, headers: corsHeaders },
+          );
+        }
+
+        // Clean up Cloudinary assets before the DB cascade removes the attachment rows
+        const attachments = await env.DB.prepare(
+          "SELECT cloudinary_public_id, cloudinary_resource_type FROM billing_attachments WHERE billing_id = ?",
+        )
+          .bind(billingId)
+          .all();
+
+        for (const att of attachments.results || []) {
+          try {
+            await destroyCloudinaryAsset(
+              att.cloudinary_public_id,
+              att.cloudinary_resource_type,
+              env,
+            );
+          } catch (cloudErr) {
+            // Don't block the delete on a Cloudinary hiccup — log and continue.
+            console.error(
+              "Cloudinary cleanup failed during bill delete:",
+              cloudErr.message,
+            );
+          }
+        }
+
+        // billing_items and billing_attachments cascade via ON DELETE CASCADE
+        await env.DB.prepare("DELETE FROM billing WHERE id = ?")
+          .bind(billingId)
+          .run();
+
+        return new Response(JSON.stringify({ success: true }), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
     }
