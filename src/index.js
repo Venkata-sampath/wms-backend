@@ -3103,7 +3103,6 @@ export default {
               .bind(transaction.reference_id, auth.context.warehouse_id)
               .first();
 
-            // SELECT * inherently returns the new batch_number column from shipment_line_items
             const lineItems = await env.DB.prepare(
               "SELECT * FROM shipment_line_items WHERE shipment_id = ? ORDER BY rowid ASC",
             )
@@ -3127,22 +3126,22 @@ export default {
           opening_stock: async () => {
             const importHeader = await env.DB.prepare(
               `SELECT osi.*, u.username AS uploaded_by, 
-              cl.name AS client_name, cl.code AS client_code,
-              so.name AS stock_owner_name, so.code AS stock_owner_code
-       FROM opening_stock_imports osi
-       LEFT JOIN users u ON u.id = osi.uploaded_by_user_id
-       LEFT JOIN clients cl ON osi.client_id = cl.id
-       LEFT JOIN stock_owners so ON osi.stock_owner_id = so.id
-       WHERE osi.id = ? AND osi.warehouse_id = ?`,
+                  cl.name AS client_name, cl.code AS client_code,
+                  so.name AS stock_owner_name, so.code AS stock_owner_code
+           FROM opening_stock_imports osi
+           LEFT JOIN users u ON u.id = osi.uploaded_by_user_id
+           LEFT JOIN clients cl ON osi.client_id = cl.id
+           LEFT JOIN stock_owners so ON osi.stock_owner_id = so.id
+           WHERE osi.id = ? AND osi.warehouse_id = ?`,
             )
               .bind(transaction.reference_id, auth.context.warehouse_id)
               .first();
 
             const lineItems = await env.DB.prepare(
               `SELECT osli.*
-       FROM opening_stock_line_items osli
-       WHERE osli.opening_stock_import_id = ?
-       ORDER BY osli.rowid ASC`,
+           FROM opening_stock_line_items osli
+           WHERE osli.opening_stock_import_id = ?
+           ORDER BY osli.rowid ASC`,
             )
               .bind(transaction.reference_id)
               .all();
@@ -3154,9 +3153,14 @@ export default {
           },
           outbound: async () => {
             const shipment = await env.DB.prepare(
-              `SELECT osd.*, u.username AS verified_by, cl.name AS client_name, cl.code AS client_code
+              `SELECT osd.*, 
+                  u_created.username AS created_by,
+                  u_verified.username AS verified_by, 
+                  cl.name AS client_name, 
+                  cl.code AS client_code
            FROM outbound_shipment_details osd
-           LEFT JOIN users u ON u.id = osd.verified_by_user_id
+           LEFT JOIN users u_created ON u_created.id = osd.created_by_user_id
+           LEFT JOIN users u_verified ON u_verified.id = osd.verified_by_user_id
            LEFT JOIN clients cl ON osd.client_id = cl.id
            WHERE osd.id = ? AND osd.warehouse_id = ?`,
             )
@@ -3164,21 +3168,32 @@ export default {
               .first();
 
             const lineItems = await env.DB.prepare(
-              "SELECT * FROM outbound_shipment_line_items WHERE outbound_shipment_detail_id = ? ORDER BY rowid ASC",
+              `SELECT osli.*, so.name AS stock_owner_name, so.code AS stock_owner_code
+           FROM outbound_shipment_line_items osli
+           LEFT JOIN stock_owners so ON osli.stock_owner_id = so.id
+           WHERE osli.outbound_shipment_detail_id = ? 
+           ORDER BY osli.rowid ASC`,
             )
               .bind(transaction.reference_id)
               .all();
 
             const pickingTasks = await env.DB.prepare(
-              "SELECT * FROM picking_tasks WHERE outbound_shipment_detail_id = ? ORDER BY created_at ASC",
+              `SELECT pt.*, 
+                  u_created.username AS created_by,
+                  u_completed.username AS completed_by
+           FROM picking_tasks pt
+           LEFT JOIN users u_created ON u_created.id = pt.created_by_user_id
+           LEFT JOIN users u_completed ON u_completed.id = pt.completed_by_user_id
+           WHERE pt.outbound_shipment_detail_id = ? 
+           ORDER BY pt.created_at ASC`,
             )
               .bind(transaction.reference_id)
               .all();
 
             return {
               shipment_header: shipment || null,
-              outbound_shipment_line_items: lineItems.results,
-              picking_tasks: pickingTasks.results,
+              outbound_shipment_line_items: lineItems.results || [],
+              picking_tasks: pickingTasks.results || [],
             };
           },
         };
