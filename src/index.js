@@ -3705,13 +3705,16 @@ export default {
 
       try {
         const tasks = await env.DB.prepare(
-          `SELECT pt.id, pt.status, pt.created_at, pt.client_id, c.name AS client_name, c.code AS client_code,
-                  osd.eway_bill_number, osd.vehicle_number, osd.transporter_name
-           FROM picking_tasks pt
-           LEFT JOIN clients c ON pt.client_id = c.id
-           LEFT JOIN outbound_shipment_details osd ON pt.outbound_shipment_detail_id = osd.id
-           WHERE pt.warehouse_id = ? AND pt.status = 'pending'
-           ORDER BY pt.created_at ASC`,
+          `SELECT pt.id, pt.status, pt.created_at, pt.client_id, 
+              c.name AS client_name, c.code AS client_code,
+              osd.eway_bill_number, osd.vehicle_number, osd.transporter_name,
+              u.username AS created_by
+       FROM picking_tasks pt
+       LEFT JOIN clients c ON pt.client_id = c.id
+       LEFT JOIN outbound_shipment_details osd ON pt.outbound_shipment_detail_id = osd.id
+       LEFT JOIN users u ON pt.created_by_user_id = u.id
+       WHERE pt.warehouse_id = ? AND pt.status = 'pending'
+       ORDER BY pt.created_at ASC`,
         )
           .bind(auth.context.warehouse_id)
           .all();
@@ -3721,7 +3724,11 @@ export default {
         if (taskIds.length > 0) {
           const placeholders = taskIds.map(() => "?").join(",");
           const items = await env.DB.prepare(
-            `SELECT * FROM picking_task_items WHERE picking_task_id IN (${placeholders}) ORDER BY rowid ASC`,
+            `SELECT pti.*, inv.manufacturing_date 
+         FROM picking_task_items pti
+         LEFT JOIN inventory inv ON pti.inventory_id = inv.id
+         WHERE pti.picking_task_id IN (${placeholders}) 
+         ORDER BY pti.rowid ASC`,
           )
             .bind(...taskIds)
             .all();
@@ -3760,15 +3767,18 @@ export default {
 
       try {
         const tasks = await env.DB.prepare(
-          `SELECT pt.id, pt.status, pt.created_at, pt.completed_at, pt.client_id, c.name AS client_name, c.code AS client_code,
-                  osd.eway_bill_number, osd.vehicle_number, osd.transporter_name,
-                  u.username AS completed_by
-           FROM picking_tasks pt
-           LEFT JOIN clients c ON pt.client_id = c.id
-           LEFT JOIN outbound_shipment_details osd ON pt.outbound_shipment_detail_id = osd.id
-           LEFT JOIN users u ON pt.completed_by_user_id = u.id
-           WHERE pt.warehouse_id = ? AND pt.status = 'completed'
-           ORDER BY pt.completed_at DESC`,
+          `SELECT pt.id, pt.status, pt.created_at, pt.completed_at, pt.client_id, 
+              c.name AS client_name, c.code AS client_code,
+              osd.eway_bill_number, osd.vehicle_number, osd.transporter_name,
+              u1.username AS created_by,
+              u2.username AS completed_by
+       FROM picking_tasks pt
+       LEFT JOIN clients c ON pt.client_id = c.id
+       LEFT JOIN outbound_shipment_details osd ON pt.outbound_shipment_detail_id = osd.id
+       LEFT JOIN users u1 ON pt.created_by_user_id = u1.id
+       LEFT JOIN users u2 ON pt.completed_by_user_id = u2.id
+       WHERE pt.warehouse_id = ? AND pt.status = 'completed'
+       ORDER BY pt.completed_at DESC`,
         )
           .bind(auth.context.warehouse_id)
           .all();
@@ -3778,7 +3788,11 @@ export default {
         if (taskIds.length > 0) {
           const placeholders = taskIds.map(() => "?").join(",");
           const items = await env.DB.prepare(
-            `SELECT * FROM picking_task_items WHERE picking_task_id IN (${placeholders}) ORDER BY rowid ASC`,
+            `SELECT pti.*, inv.manufacturing_date 
+         FROM picking_task_items pti
+         LEFT JOIN inventory inv ON pti.inventory_id = inv.id
+         WHERE pti.picking_task_id IN (${placeholders}) 
+         ORDER BY pti.rowid ASC`,
           )
             .bind(...taskIds)
             .all();
