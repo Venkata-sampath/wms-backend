@@ -31,6 +31,7 @@ CREATE TABLE shipment_line_items (
     manufacturing_date TEXT,
     expiry_date TEXT,
     batch_number TEXT,
+    case_conversion_qty REAL,
 
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

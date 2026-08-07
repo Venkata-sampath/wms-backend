@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS opening_stock_line_items (
     batch_number TEXT,
     manufacturing_date TEXT,
     expiry_date TEXT,
+    case_conversion_qty REAL,
     location_id TEXT NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );

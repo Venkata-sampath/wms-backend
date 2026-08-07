@@ -17,6 +17,7 @@ const REQUIRED_EXCEL_HEADERS = [
   "Manufacturing Date",
   "Expiry Date",
 ];
+const OPTIONAL_EXCEL_HEADERS = ["Case Conversion Qty"];
 
 const VALID_CATEGORIES = ["ambient", "frozen", "chiller"];
 
@@ -78,6 +79,15 @@ function parseAndValidateExcel(arrayBuffer) {
     }
   });
 
+  OPTIONAL_EXCEL_HEADERS.forEach((optHeader) => {
+    const idx = fileHeaders.findIndex(
+      (fh) => fh.toLowerCase() === optHeader.toLowerCase(),
+    );
+    if (idx !== -1) {
+      headerMap[optHeader] = idx;
+    }
+  });
+
   if (errors.length > 0) {
     return { isValid: false, errors, warnings, parsedRows: [] };
   }
@@ -105,6 +115,10 @@ function parseAndValidateExcel(arrayBuffer) {
     const batchNumber = String(row[headerMap["Batch Number"]] || "").trim();
     const rawMfgDate = row[headerMap["Manufacturing Date"]];
     const rawExpDate = row[headerMap["Expiry Date"]];
+    const rawCaseConversionQty =
+      headerMap["Case Conversion Qty"] !== undefined
+        ? row[headerMap["Case Conversion Qty"]]
+        : null;
 
     // Required Field Validations
     if (!itemCode) errors.push(`Row ${excelRowNum}: Item Code is mandatory.`);
@@ -148,6 +162,22 @@ function parseAndValidateExcel(arrayBuffer) {
       );
     }
 
+    let caseConversionQty = null;
+    if (
+      rawCaseConversionQty !== null &&
+      rawCaseConversionQty !== undefined &&
+      String(rawCaseConversionQty).trim() !== ""
+    ) {
+      const parsedCaseQty = Number(rawCaseConversionQty);
+      if (isNaN(parsedCaseQty) || parsedCaseQty <= 0) {
+        errors.push(
+          `Row ${excelRowNum}: Case Conversion Qty must be a valid positive number when provided.`,
+        );
+      } else {
+        caseConversionQty = parsedCaseQty;
+      }
+    }
+
     if (mfgDate && expDate && mfgDate !== "INVALID" && expDate !== "INVALID") {
       if (new Date(expDate) < new Date(mfgDate)) {
         errors.push(
@@ -176,6 +206,7 @@ function parseAndValidateExcel(arrayBuffer) {
       batch_number: batchNumber || null,
       manufacturing_date: mfgDate === "INVALID" ? null : mfgDate,
       expiry_date: expDate === "INVALID" ? null : expDate,
+      case_conversion_qty: caseConversionQty,
     });
   }
 
@@ -1717,8 +1748,8 @@ export default {
           id, shipment_id, item_code, item_description, hsn_sac, ordered_quantity, uom, rate, gross_amount,
           discount_amount, taxable_amount, tax_rate_percent, cgst, sgst, igst, cess, total_amount, category,
           received_quantity, damaged_quantity, shortage_quantity, excess_quantity, discrepancy_uom, discrepancy_notes,
-          manufacturing_date, expiry_date, batch_number
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          manufacturing_date, expiry_date, batch_number, case_conversion_qty
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               ).bind(
                 lineItemId,
                 shipmentId,
@@ -1747,6 +1778,7 @@ export default {
                 resolvedManufacturingDate,
                 resolvedExpiryDate,
                 resolvedBatchNumber,
+                cleanFloat(item.case_conversion_qty),
               ),
             );
 
@@ -2306,6 +2338,7 @@ export default {
               manufacturing_date: targetItem.manufacturing_date ?? null,
               expiry_date: targetItem.expiry_date ?? null,
               batch_number: targetItem.batch_number ?? null,
+              case_conversion_qty: targetItem.case_conversion_qty ?? null,
               shipment_line_item_id: targetItem.shipment_line_item_id,
               uom: targetItem.uom,
             };
@@ -2370,8 +2403,8 @@ export default {
             env.DB.prepare(
               `INSERT INTO inventory (
         id, shipment_line_item_id, inventory_source, source_reference_id, warehouse_id, location_id, item_code, 
-        item_description, quantity, uom, category, manufacturing_date, expiry_date, batch_number, client_id, stock_owner_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        item_description, quantity, uom, category, manufacturing_date, expiry_date, batch_number, case_conversion_qty, client_id, stock_owner_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ).bind(
               "inv_" + crypto.randomUUID(),
               itemBatchMeta.shipment_line_item_id,
@@ -2387,6 +2420,7 @@ export default {
               itemBatchMeta.manufacturing_date,
               itemBatchMeta.expiry_date,
               itemBatchMeta.batch_number,
+              itemBatchMeta.case_conversion_qty ?? null,
               originalTask.client_id,
               originalTask.stock_owner_id,
             ),
@@ -2975,8 +3009,8 @@ export default {
           const lineItemId = `osli_${crypto.randomUUID().slice(0, 8)}`;
           dbStatements.push(
             env.DB.prepare(
-              `INSERT INTO opening_stock_line_items (id, opening_stock_import_id, item_code, item_description, quantity, uom, category, batch_number, manufacturing_date, expiry_date, location_id, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+              `INSERT INTO opening_stock_line_items (id, opening_stock_import_id, item_code, item_description, quantity, uom, category, batch_number, manufacturing_date, expiry_date, case_conversion_qty, location_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
             ).bind(
               lineItemId,
               importId,
@@ -2988,6 +3022,7 @@ export default {
               row.batch_number,
               row.manufacturing_date,
               row.expiry_date,
+              row.case_conversion_qty ?? null,
               locUpper,
             ),
           );
@@ -2995,8 +3030,8 @@ export default {
           const inventoryId = `inv_os_${crypto.randomUUID().slice(0, 8)}`;
           dbStatements.push(
             env.DB.prepare(
-              `INSERT INTO inventory (id, inventory_source, source_reference_id, shipment_line_item_id, warehouse_id, client_id, stock_owner_id, location_id, item_code, item_description, quantity, uom, category, manufacturing_date, expiry_date, batch_number, created_at)
-           VALUES (?, 'opening_stock', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+              `INSERT INTO inventory (id, inventory_source, source_reference_id, shipment_line_item_id, warehouse_id, client_id, stock_owner_id, location_id, item_code, item_description, quantity, uom, category, manufacturing_date, expiry_date, batch_number, case_conversion_qty, created_at)
+           VALUES (?, 'opening_stock', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
             ).bind(
               inventoryId,
               lineItemId,
@@ -3012,6 +3047,7 @@ export default {
               row.manufacturing_date,
               row.expiry_date,
               row.batch_number,
+              row.case_conversion_qty ?? null,
             ),
           );
         }
@@ -3786,7 +3822,7 @@ export default {
         if (taskIds.length > 0) {
           const placeholders = taskIds.map(() => "?").join(",");
           const items = await env.DB.prepare(
-            `SELECT pti.*, inv.manufacturing_date 
+            `SELECT pti.*, inv.manufacturing_date, inv.case_conversion_qty 
          FROM picking_task_items pti
          LEFT JOIN inventory inv ON pti.inventory_id = inv.id
          WHERE pti.picking_task_id IN (${placeholders}) 
@@ -3850,7 +3886,7 @@ export default {
         if (taskIds.length > 0) {
           const placeholders = taskIds.map(() => "?").join(",");
           const items = await env.DB.prepare(
-            `SELECT pti.*, inv.manufacturing_date 
+            `SELECT pti.*, inv.manufacturing_date, inv.case_conversion_qty 
          FROM picking_task_items pti
          LEFT JOIN inventory inv ON pti.inventory_id = inv.id
          WHERE pti.picking_task_id IN (${placeholders}) 
