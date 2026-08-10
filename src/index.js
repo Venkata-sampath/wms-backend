@@ -4126,7 +4126,7 @@ export default {
         const binds = [auth.context.warehouse_id];
 
         if (search) {
-          query += " AND (b.bill_number LIKE ? OR c.name LIKE ?)";
+          query += " AND (b.invoice_number LIKE ? OR c.name LIKE ?)";
           binds.push(`%${search}%`, `%${search}%`);
         }
         if (clientId) {
@@ -4177,7 +4177,7 @@ export default {
       try {
         const payload = await request.json();
         const client_id = String(payload.client_id || "").trim();
-        const bill_number = String(payload.bill_number || "").trim();
+        const invoice_number = String(payload.invoice_number || "").trim();
         const invoice_date = String(payload.invoice_date || "").trim();
         const due_date = payload.due_date
           ? String(payload.due_date).trim()
@@ -4199,11 +4199,11 @@ export default {
         const notes = payload.notes ? String(payload.notes).trim() : null;
         const items = Array.isArray(payload.items) ? payload.items : [];
 
-        if (!client_id || !bill_number || !invoice_date) {
+        if (!client_id || !invoice_number || !invoice_date) {
           return new Response(
             JSON.stringify({
               error:
-                "Client, Bill Number, and Invoice Date are mandatory fields.",
+                "Client, Invoice Number, and Invoice Date are mandatory fields.",
             }),
             { status: 400, headers: corsHeaders },
           );
@@ -4230,16 +4230,16 @@ export default {
           );
         }
 
-        // Duplicate bill number check within this warehouse
+        // Duplicate invoice number check within this warehouse
         const existingBill = await env.DB.prepare(
-          "SELECT id FROM billing WHERE warehouse_id = ? AND bill_number = ?",
+          "SELECT id FROM billing WHERE warehouse_id = ? AND invoice_number = ?",
         )
-          .bind(auth.context.warehouse_id, bill_number)
+          .bind(auth.context.warehouse_id, invoice_number)
           .first();
         if (existingBill) {
           return new Response(
             JSON.stringify({
-              error: `Bill Number '${bill_number}' is already in use in this warehouse. Please use a different Bill Number.`,
+              error: `Invoice Number '${invoice_number}' is already in use in this warehouse. Please use a different Invoice Number.`,
             }),
             { status: 409, headers: corsHeaders },
           );
@@ -4250,7 +4250,7 @@ export default {
         const batchStatements = [
           env.DB.prepare(
             `INSERT INTO billing (
-              id, warehouse_id, client_id, bill_number, invoice_date, due_date,
+              id, warehouse_id, client_id, invoice_number, invoice_date, due_date,
               billing_period_from, billing_period_to, reference_number,
               subtotal, tax, discount, other_charges, grand_total, notes,
               status, created_by_user_id, updated_by_user_id
@@ -4259,7 +4259,7 @@ export default {
             billingId,
             auth.context.warehouse_id,
             client_id,
-            bill_number,
+            invoice_number,
             invoice_date,
             due_date,
             billing_period_from,
@@ -4656,7 +4656,7 @@ export default {
       try {
         const billingId = billingDetailMatch[1];
         const existingBill = await env.DB.prepare(
-          "SELECT id, status, bill_number FROM billing WHERE id = ? AND warehouse_id = ?",
+          "SELECT id, status, invoice_number FROM billing WHERE id = ? AND warehouse_id = ?",
         )
           .bind(billingId, auth.context.warehouse_id)
           .first();
@@ -4678,7 +4678,7 @@ export default {
 
         const payload = await request.json();
         const client_id = String(payload.client_id || "").trim();
-        const bill_number = String(payload.bill_number || "").trim();
+        const invoice_number = String(payload.invoice_number || "").trim();
         const invoice_date = String(payload.invoice_date || "").trim();
         const due_date = payload.due_date
           ? String(payload.due_date).trim()
@@ -4700,11 +4700,11 @@ export default {
         const notes = payload.notes ? String(payload.notes).trim() : null;
         const items = Array.isArray(payload.items) ? payload.items : [];
 
-        if (!client_id || !bill_number || !invoice_date) {
+        if (!client_id || !invoice_number || !invoice_date) {
           return new Response(
             JSON.stringify({
               error:
-                "Client, Bill Number, and Invoice Date are mandatory fields.",
+                "Client, Invoice Number, and Invoice Date are mandatory fields.",
             }),
             { status: 400, headers: corsHeaders },
           );
@@ -4716,17 +4716,17 @@ export default {
           );
         }
 
-        // Duplicate bill number check, excluding this bill itself
-        if (bill_number !== existingBill.bill_number) {
+        // Duplicate invoice number check, excluding this bill itself
+        if (invoice_number !== existingBill.invoice_number) {
           const duplicateBill = await env.DB.prepare(
-            "SELECT id FROM billing WHERE warehouse_id = ? AND bill_number = ? AND id != ?",
+            "SELECT id FROM billing WHERE warehouse_id = ? AND invoice_number = ? AND id != ?",
           )
-            .bind(auth.context.warehouse_id, bill_number, billingId)
+            .bind(auth.context.warehouse_id, invoice_number, billingId)
             .first();
           if (duplicateBill) {
             return new Response(
               JSON.stringify({
-                error: `Bill Number '${bill_number}' is already in use in this warehouse. Please use a different Bill Number.`,
+                error: `Invoice Number '${invoice_number}' is already in use in this warehouse. Please use a different Invoice Number.`,
               }),
               { status: 409, headers: corsHeaders },
             );
@@ -4736,14 +4736,14 @@ export default {
         const batchStatements = [
           env.DB.prepare(
             `UPDATE billing SET
-              client_id = ?, bill_number = ?, invoice_date = ?, due_date = ?,
+              client_id = ?, invoice_number = ?, invoice_date = ?, due_date = ?,
               billing_period_from = ?, billing_period_to = ?, reference_number = ?,
               subtotal = ?, tax = ?, discount = ?, other_charges = ?, grand_total = ?,
               notes = ?, updated_by_user_id = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?`,
           ).bind(
             client_id,
-            bill_number,
+            invoice_number,
             invoice_date,
             due_date,
             billing_period_from,

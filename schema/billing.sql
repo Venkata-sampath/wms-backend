@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS billing (
     id TEXT PRIMARY KEY,
     warehouse_id TEXT NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
     client_id TEXT NOT NULL REFERENCES clients(id),
-    bill_number TEXT NOT NULL,
+    invoice_number TEXT NOT NULL,
     invoice_date TEXT NOT NULL,
     due_date TEXT,
     billing_period_from TEXT,
@@ -21,5 +21,5 @@ CREATE TABLE IF NOT EXISTS billing (
     updated_by_user_id TEXT REFERENCES users(id),
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(warehouse_id, bill_number)
+    UNIQUE(warehouse_id, invoice_number)
 );
