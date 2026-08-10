@@ -1,4 +1,4 @@
-DROP TABLE IF EXISTS billing_main_items;
+DROP TABLE IF EXISTS billing_items;
 
 CREATE TABLE IF NOT EXISTS billing_main_items (
     id TEXT PRIMARY KEY,
