@@ -4362,7 +4362,13 @@ export default {
               tax_type, subtotal, cgst_amount, sgst_amount, igst_amount, round_off,
               discount, other_charges, grand_total, notes, other_ref,
               status, created_by_user_id, updated_by_user_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL)`,
+            ) VALUES (
+              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )`,
           ).bind(
             billingId,
             auth.context.warehouse_id,
@@ -4411,7 +4417,9 @@ export default {
             grand_total,
             notes,
             other_ref,
-            auth.context.user_id,
+            "pending", // 48. status
+            auth.context.user_id, // 49. created_by_user_id
+            null, // 50. updated_by_user_id
           ),
         ];
 
