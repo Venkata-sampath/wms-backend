@@ -4160,7 +4160,7 @@ export default {
     }
 
     // -------------------------------------------------------------------------
-    // POST /api/billing -> Create a new bill (status always starts 'pending')
+    // POST /api/billing -> Create a new bill
     // -------------------------------------------------------------------------
     if (request.method === "POST" && url.pathname === "/api/billing") {
       const auth = await getTenantContext(request, env);
@@ -4264,6 +4264,12 @@ export default {
         const wh_branch_ifsc = payload.wh_branch_ifsc
           ? String(payload.wh_branch_ifsc).trim()
           : null;
+        const wh_contact = payload.wh_contact
+          ? String(payload.wh_contact).trim()
+          : null;
+        const wh_email = payload.wh_email
+          ? String(payload.wh_email).trim()
+          : null;
 
         // Buyer snapshot
         const buyer_name = payload.buyer_name
@@ -4275,15 +4281,6 @@ export default {
         const buyer_address = payload.buyer_address
           ? String(payload.buyer_address).trim()
           : null;
-        const buyer_contact = payload.buyer_contact
-          ? String(payload.buyer_contact).trim()
-          : null;
-        const buyer_phone = payload.buyer_phone
-          ? String(payload.buyer_phone).trim()
-          : null;
-        const buyer_email = payload.buyer_email
-          ? String(payload.buyer_email).trim()
-          : null;
         const buyer_state_name = payload.buyer_state_name
           ? String(payload.buyer_state_name).trim()
           : null;
@@ -4294,7 +4291,6 @@ export default {
           ? String(payload.place_of_supply).trim()
           : null;
 
-        // Tax type + amounts (client computes; server trusts but validates shape)
         const tax_type = payload.tax_type === "inter" ? "inter" : "intra";
         const cgst_amount = Number(payload.cgst_amount) || 0;
         const sgst_amount = Number(payload.sgst_amount) || 0;
@@ -4316,7 +4312,6 @@ export default {
           );
         }
 
-        // Confirm the client belongs to this warehouse
         const clientRow = await env.DB.prepare(
           "SELECT id FROM clients WHERE id = ? AND warehouse_id = ?",
         )
@@ -4331,7 +4326,6 @@ export default {
           );
         }
 
-        // Duplicate invoice number check within this warehouse
         const existingBill = await env.DB.prepare(
           "SELECT id FROM billing WHERE warehouse_id = ? AND invoice_number = ?",
         )
@@ -4356,9 +4350,8 @@ export default {
               buyers_order_no, buyers_order_date, dispatch_doc_no, dispatch_through,
               destination, terms_of_delivery, delivery_note, delivery_note_date,
               wh_company_name, wh_gstin, wh_address, wh_state_name, wh_state_code,
-              wh_fssai, wh_bank_name, wh_account_number, wh_branch_ifsc,
-              buyer_name, buyer_gstin, buyer_address, buyer_contact, buyer_phone,
-              buyer_email, buyer_state_name, buyer_state_code, place_of_supply,
+              wh_fssai, wh_bank_name, wh_account_number, wh_branch_ifsc, wh_contact, wh_email,
+              buyer_name, buyer_gstin, buyer_address, buyer_state_name, buyer_state_code, place_of_supply,
               tax_type, subtotal, cgst_amount, sgst_amount, igst_amount, round_off,
               discount, other_charges, grand_total, notes, other_ref,
               status, created_by_user_id, updated_by_user_id
@@ -4367,7 +4360,7 @@ export default {
               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+              ?, ?, ?, ?, ?, ?, ?, ?, ?
             )`,
           ).bind(
             billingId,
@@ -4397,12 +4390,11 @@ export default {
             wh_bank_name,
             wh_account_number,
             wh_branch_ifsc,
+            wh_contact,
+            wh_email,
             buyer_name,
             buyer_gstin,
             buyer_address,
-            buyer_contact,
-            buyer_phone,
-            buyer_email,
             buyer_state_name,
             buyer_state_code,
             place_of_supply,
@@ -4417,9 +4409,9 @@ export default {
             grand_total,
             notes,
             other_ref,
-            "pending", // 48. status
-            auth.context.user_id, // 49. created_by_user_id
-            null, // 50. updated_by_user_id
+            "pending",
+            auth.context.user_id,
+            null,
           ),
         ];
 
@@ -4963,6 +4955,12 @@ export default {
         const wh_branch_ifsc = payload.wh_branch_ifsc
           ? String(payload.wh_branch_ifsc).trim()
           : null;
+        const wh_contact = payload.wh_contact
+          ? String(payload.wh_contact).trim()
+          : null;
+        const wh_email = payload.wh_email
+          ? String(payload.wh_email).trim()
+          : null;
 
         const buyer_name = payload.buyer_name
           ? String(payload.buyer_name).trim()
@@ -4972,15 +4970,6 @@ export default {
           : null;
         const buyer_address = payload.buyer_address
           ? String(payload.buyer_address).trim()
-          : null;
-        const buyer_contact = payload.buyer_contact
-          ? String(payload.buyer_contact).trim()
-          : null;
-        const buyer_phone = payload.buyer_phone
-          ? String(payload.buyer_phone).trim()
-          : null;
-        const buyer_email = payload.buyer_email
-          ? String(payload.buyer_email).trim()
           : null;
         const buyer_state_name = payload.buyer_state_name
           ? String(payload.buyer_state_name).trim()
@@ -5013,7 +5002,6 @@ export default {
           );
         }
 
-        // Duplicate invoice number check, excluding this bill itself
         if (invoice_number !== existingBill.invoice_number) {
           const duplicateBill = await env.DB.prepare(
             "SELECT id FROM billing WHERE warehouse_id = ? AND invoice_number = ? AND id != ?",
@@ -5023,14 +5011,13 @@ export default {
           if (duplicateBill) {
             return new Response(
               JSON.stringify({
-                error: `Invoice Number '${invoice_number}' is already in use in this warehouse. Please use a different Invoice Number.`,
+                error: `Invoice Number '${invoice_number}' is already in use in this warehouse.`,
               }),
               { status: 409, headers: corsHeaders },
             );
           }
         }
 
-        // Fetch existing main item IDs so we can cascade-delete their sub items
         const existingMainItems = await env.DB.prepare(
           "SELECT id FROM billing_main_items WHERE billing_id = ?",
         )
@@ -5048,9 +5035,8 @@ export default {
               buyers_order_no = ?, buyers_order_date = ?, dispatch_doc_no = ?, dispatch_through = ?,
               destination = ?, terms_of_delivery = ?, delivery_note = ?, delivery_note_date = ?,
               wh_company_name = ?, wh_gstin = ?, wh_address = ?, wh_state_name = ?, wh_state_code = ?,
-              wh_fssai = ?, wh_bank_name = ?, wh_account_number = ?, wh_branch_ifsc = ?,
-              buyer_name = ?, buyer_gstin = ?, buyer_address = ?, buyer_contact = ?, buyer_phone = ?,
-              buyer_email = ?, buyer_state_name = ?, buyer_state_code = ?, place_of_supply = ?,
+              wh_fssai = ?, wh_bank_name = ?, wh_account_number = ?, wh_branch_ifsc = ?, wh_contact = ?, wh_email = ?,
+              buyer_name = ?, buyer_gstin = ?, buyer_address = ?, buyer_state_name = ?, buyer_state_code = ?, place_of_supply = ?,
               tax_type = ?, subtotal = ?, cgst_amount = ?, sgst_amount = ?, igst_amount = ?, round_off = ?,
               discount = ?, other_charges = ?, grand_total = ?, notes = ?, other_ref = ?,
               updated_by_user_id = ?, updated_at = CURRENT_TIMESTAMP
@@ -5081,12 +5067,11 @@ export default {
             wh_bank_name,
             wh_account_number,
             wh_branch_ifsc,
+            wh_contact,
+            wh_email,
             buyer_name,
             buyer_gstin,
             buyer_address,
-            buyer_contact,
-            buyer_phone,
-            buyer_email,
             buyer_state_name,
             buyer_state_code,
             place_of_supply,
@@ -5106,7 +5091,6 @@ export default {
           ),
         ];
 
-        // Wipe and re-insert main+sub items (sub items cascade via FK on main item delete)
         if (existingMainIds.length > 0) {
           const placeholders = existingMainIds.map(() => "?").join(",");
           batchStatements.push(

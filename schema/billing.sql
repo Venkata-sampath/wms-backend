@@ -34,17 +34,17 @@ CREATE TABLE IF NOT EXISTS billing (
     wh_bank_name TEXT,
     wh_account_number TEXT,
     wh_branch_ifsc TEXT,
+    wh_contact TEXT,           -- ADDED
+    wh_email TEXT,             -- ADDED
 
     -- Buyer snapshot — frozen at time of bill, editable per bill
     buyer_name TEXT,
     buyer_gstin TEXT,
     buyer_address TEXT,
-    buyer_contact TEXT,
-    buyer_phone TEXT,
-    buyer_email TEXT,
     buyer_state_name TEXT,
     buyer_state_code TEXT,
     place_of_supply TEXT,
+    -- buyer_contact, buyer_phone, buyer_email REMOVED
 
     -- Tax computation
     tax_type TEXT NOT NULL DEFAULT 'intra',  -- 'intra' (CGST+SGST) | 'inter' (IGST)
