@@ -4090,6 +4090,11 @@ export default {
     // BILLING MODULE — manual invoice creation. No automatic calculation of
     // any kind; every numeric field is entered and trusted as-is from the
     // client. status is binary: 'pending' -> 'paid' (one-way, via mark-paid).
+    // Hierarchical items: billing_main_items (HSN/SAC category) each with
+    // billing_sub_items (breakdown lines). tax_type is 'intra' (CGST+SGST)
+    // or 'inter' (IGST), derived client-side from wh_state_code vs the
+    // buyer's place_of_supply state code, but trusted as sent since the
+    // client already computed cgst/sgst/igst amounts consistently with it.
     // =========================================================================
 
     // -------------------------------------------------------------------------
@@ -4191,13 +4196,109 @@ export default {
         const reference_number = payload.reference_number
           ? String(payload.reference_number).trim()
           : null;
+        const reference_date = payload.reference_date
+          ? String(payload.reference_date).trim()
+          : null;
         const subtotal = Number(payload.subtotal) || 0;
-        const tax = Number(payload.tax) || 0;
         const discount = Number(payload.discount) || 0;
         const other_charges = Number(payload.other_charges) || 0;
         const grand_total = Number(payload.grand_total) || 0;
+        const round_off = Number(payload.round_off) || 0;
         const notes = payload.notes ? String(payload.notes).trim() : null;
+        const other_ref = payload.other_ref
+          ? String(payload.other_ref).trim()
+          : null;
         const items = Array.isArray(payload.items) ? payload.items : [];
+
+        // Dispatch/delivery block
+        const buyers_order_no = payload.buyers_order_no
+          ? String(payload.buyers_order_no).trim()
+          : null;
+        const buyers_order_date = payload.buyers_order_date
+          ? String(payload.buyers_order_date).trim()
+          : null;
+        const dispatch_doc_no = payload.dispatch_doc_no
+          ? String(payload.dispatch_doc_no).trim()
+          : null;
+        const dispatch_through = payload.dispatch_through
+          ? String(payload.dispatch_through).trim()
+          : null;
+        const destination = payload.destination
+          ? String(payload.destination).trim()
+          : null;
+        const terms_of_delivery = payload.terms_of_delivery
+          ? String(payload.terms_of_delivery).trim()
+          : null;
+        const delivery_note = payload.delivery_note
+          ? String(payload.delivery_note).trim()
+          : null;
+        const delivery_note_date = payload.delivery_note_date
+          ? String(payload.delivery_note_date).trim()
+          : null;
+
+        // Warehouse (seller) snapshot
+        const wh_company_name = payload.wh_company_name
+          ? String(payload.wh_company_name).trim()
+          : null;
+        const wh_gstin = payload.wh_gstin
+          ? String(payload.wh_gstin).trim()
+          : null;
+        const wh_address = payload.wh_address
+          ? String(payload.wh_address).trim()
+          : null;
+        const wh_state_name = payload.wh_state_name
+          ? String(payload.wh_state_name).trim()
+          : null;
+        const wh_state_code = payload.wh_state_code
+          ? String(payload.wh_state_code).trim()
+          : null;
+        const wh_fssai = payload.wh_fssai
+          ? String(payload.wh_fssai).trim()
+          : null;
+        const wh_bank_name = payload.wh_bank_name
+          ? String(payload.wh_bank_name).trim()
+          : null;
+        const wh_account_number = payload.wh_account_number
+          ? String(payload.wh_account_number).trim()
+          : null;
+        const wh_branch_ifsc = payload.wh_branch_ifsc
+          ? String(payload.wh_branch_ifsc).trim()
+          : null;
+
+        // Buyer snapshot
+        const buyer_name = payload.buyer_name
+          ? String(payload.buyer_name).trim()
+          : null;
+        const buyer_gstin = payload.buyer_gstin
+          ? String(payload.buyer_gstin).trim()
+          : null;
+        const buyer_address = payload.buyer_address
+          ? String(payload.buyer_address).trim()
+          : null;
+        const buyer_contact = payload.buyer_contact
+          ? String(payload.buyer_contact).trim()
+          : null;
+        const buyer_phone = payload.buyer_phone
+          ? String(payload.buyer_phone).trim()
+          : null;
+        const buyer_email = payload.buyer_email
+          ? String(payload.buyer_email).trim()
+          : null;
+        const buyer_state_name = payload.buyer_state_name
+          ? String(payload.buyer_state_name).trim()
+          : null;
+        const buyer_state_code = payload.buyer_state_code
+          ? String(payload.buyer_state_code).trim()
+          : null;
+        const place_of_supply = payload.place_of_supply
+          ? String(payload.place_of_supply).trim()
+          : null;
+
+        // Tax type + amounts (client computes; server trusts but validates shape)
+        const tax_type = payload.tax_type === "inter" ? "inter" : "intra";
+        const cgst_amount = Number(payload.cgst_amount) || 0;
+        const sgst_amount = Number(payload.sgst_amount) || 0;
+        const igst_amount = Number(payload.igst_amount) || 0;
 
         if (!client_id || !invoice_number || !invoice_date) {
           return new Response(
@@ -4251,10 +4352,17 @@ export default {
           env.DB.prepare(
             `INSERT INTO billing (
               id, warehouse_id, client_id, invoice_number, invoice_date, due_date,
-              billing_period_from, billing_period_to, reference_number,
-              subtotal, tax, discount, other_charges, grand_total, notes,
+              billing_period_from, billing_period_to, reference_number, reference_date,
+              buyers_order_no, buyers_order_date, dispatch_doc_no, dispatch_through,
+              destination, terms_of_delivery, delivery_note, delivery_note_date,
+              wh_company_name, wh_gstin, wh_address, wh_state_name, wh_state_code,
+              wh_fssai, wh_bank_name, wh_account_number, wh_branch_ifsc,
+              buyer_name, buyer_gstin, buyer_address, buyer_contact, buyer_phone,
+              buyer_email, buyer_state_name, buyer_state_code, place_of_supply,
+              tax_type, subtotal, cgst_amount, sgst_amount, igst_amount, round_off,
+              discount, other_charges, grand_total, notes, other_ref,
               status, created_by_user_id, updated_by_user_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL)`,
           ).bind(
             billingId,
             auth.context.warehouse_id,
@@ -4265,38 +4373,94 @@ export default {
             billing_period_from,
             billing_period_to,
             reference_number,
+            reference_date,
+            buyers_order_no,
+            buyers_order_date,
+            dispatch_doc_no,
+            dispatch_through,
+            destination,
+            terms_of_delivery,
+            delivery_note,
+            delivery_note_date,
+            wh_company_name,
+            wh_gstin,
+            wh_address,
+            wh_state_name,
+            wh_state_code,
+            wh_fssai,
+            wh_bank_name,
+            wh_account_number,
+            wh_branch_ifsc,
+            buyer_name,
+            buyer_gstin,
+            buyer_address,
+            buyer_contact,
+            buyer_phone,
+            buyer_email,
+            buyer_state_name,
+            buyer_state_code,
+            place_of_supply,
+            tax_type,
             subtotal,
-            tax,
+            cgst_amount,
+            sgst_amount,
+            igst_amount,
+            round_off,
             discount,
             other_charges,
             grand_total,
             notes,
+            other_ref,
             auth.context.user_id,
           ),
         ];
 
-        items.forEach((item) => {
-          const itemId = "bit_" + crypto.randomUUID();
+        items.forEach((item, idx) => {
+          const mainItemId = "bmi_" + crypto.randomUUID();
           batchStatements.push(
             env.DB.prepare(
-              `INSERT INTO billing_items (id, billing_id, description, quantity, unit, rate, amount)
+              `INSERT INTO billing_main_items (id, billing_id, main_description, hsn_sac, tax_rate, amount, sort_order)
                VALUES (?, ?, ?, ?, ?, ?, ?)`,
             ).bind(
-              itemId,
+              mainItemId,
               billingId,
-              String(item.description || "").trim(),
-              item.quantity !== undefined && item.quantity !== ""
-                ? Number(item.quantity)
-                : null,
-              item.unit ? String(item.unit).trim() : null,
-              item.rate !== undefined && item.rate !== ""
-                ? Number(item.rate)
-                : null,
-              item.amount !== undefined && item.amount !== ""
-                ? Number(item.amount)
-                : null,
+              String(item.main_description || item.description || "").trim(),
+              String(item.hsn_sac || "").trim(),
+              Number(item.tax_rate) || 0,
+              Number(item.amount) || 0,
+              idx,
             ),
           );
+
+          const subItems = Array.isArray(item.sub_items) ? item.sub_items : [];
+          subItems.forEach((sub, subIdx) => {
+            const subItemId = "bsi_" + crypto.randomUUID();
+            batchStatements.push(
+              env.DB.prepare(
+                `INSERT INTO billing_sub_items (id, main_item_id, sub_description, quantity, unit, rate, amount, sort_order)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+              ).bind(
+                subItemId,
+                mainItemId,
+                sub.sub_description ? String(sub.sub_description).trim() : null,
+                sub.quantity !== undefined &&
+                  sub.quantity !== null &&
+                  sub.quantity !== ""
+                  ? Number(sub.quantity)
+                  : null,
+                sub.unit ? String(sub.unit).trim() : null,
+                sub.rate !== undefined && sub.rate !== null && sub.rate !== ""
+                  ? Number(sub.rate)
+                  : null,
+                sub.amount !== undefined &&
+                  sub.amount !== null &&
+                  sub.amount !== ""
+                  ? Number(sub.amount)
+                  : null,
+                subIdx,
+              ),
+            );
+          });
         });
 
         await env.DB.batch(batchStatements);
@@ -4605,11 +4769,44 @@ export default {
           });
         }
 
-        const items = await env.DB.prepare(
-          "SELECT id, description, quantity, unit, rate, amount FROM billing_items WHERE billing_id = ? ORDER BY created_at ASC",
+        const mainItemsRes = await env.DB.prepare(
+          "SELECT id, main_description, hsn_sac, tax_rate, amount, sort_order FROM billing_main_items WHERE billing_id = ? ORDER BY sort_order ASC, created_at ASC",
         )
           .bind(billingId)
           .all();
+        const mainItemRows = mainItemsRes.results || [];
+
+        let subItemRows = [];
+        if (mainItemRows.length > 0) {
+          const mainIds = mainItemRows.map((m) => m.id);
+          const placeholders = mainIds.map(() => "?").join(",");
+          const subItemsRes = await env.DB.prepare(
+            `SELECT id, main_item_id, sub_description, quantity, unit, rate, amount, sort_order
+             FROM billing_sub_items WHERE main_item_id IN (${placeholders})
+             ORDER BY sort_order ASC, created_at ASC`,
+          )
+            .bind(...mainIds)
+            .all();
+          subItemRows = subItemsRes.results || [];
+        }
+
+        const items = mainItemRows.map((m) => ({
+          id: m.id,
+          main_description: m.main_description,
+          hsn_sac: m.hsn_sac,
+          tax_rate: m.tax_rate,
+          amount: m.amount,
+          sub_items: subItemRows
+            .filter((s) => s.main_item_id === m.id)
+            .map((s) => ({
+              id: s.id,
+              sub_description: s.sub_description,
+              quantity: s.quantity,
+              unit: s.unit,
+              rate: s.rate,
+              amount: s.amount,
+            })),
+        }));
 
         const attachments = await env.DB.prepare(
           "SELECT id, file_name, file_url, created_at FROM billing_attachments WHERE billing_id = ? ORDER BY created_at ASC",
@@ -4620,7 +4817,7 @@ export default {
         return new Response(
           JSON.stringify({
             bill,
-            items: items.results || [],
+            items,
             attachments: attachments.results || [],
           }),
           {
@@ -4692,13 +4889,105 @@ export default {
         const reference_number = payload.reference_number
           ? String(payload.reference_number).trim()
           : null;
+        const reference_date = payload.reference_date
+          ? String(payload.reference_date).trim()
+          : null;
         const subtotal = Number(payload.subtotal) || 0;
-        const tax = Number(payload.tax) || 0;
         const discount = Number(payload.discount) || 0;
         const other_charges = Number(payload.other_charges) || 0;
         const grand_total = Number(payload.grand_total) || 0;
+        const round_off = Number(payload.round_off) || 0;
         const notes = payload.notes ? String(payload.notes).trim() : null;
+        const other_ref = payload.other_ref
+          ? String(payload.other_ref).trim()
+          : null;
         const items = Array.isArray(payload.items) ? payload.items : [];
+
+        const buyers_order_no = payload.buyers_order_no
+          ? String(payload.buyers_order_no).trim()
+          : null;
+        const buyers_order_date = payload.buyers_order_date
+          ? String(payload.buyers_order_date).trim()
+          : null;
+        const dispatch_doc_no = payload.dispatch_doc_no
+          ? String(payload.dispatch_doc_no).trim()
+          : null;
+        const dispatch_through = payload.dispatch_through
+          ? String(payload.dispatch_through).trim()
+          : null;
+        const destination = payload.destination
+          ? String(payload.destination).trim()
+          : null;
+        const terms_of_delivery = payload.terms_of_delivery
+          ? String(payload.terms_of_delivery).trim()
+          : null;
+        const delivery_note = payload.delivery_note
+          ? String(payload.delivery_note).trim()
+          : null;
+        const delivery_note_date = payload.delivery_note_date
+          ? String(payload.delivery_note_date).trim()
+          : null;
+
+        const wh_company_name = payload.wh_company_name
+          ? String(payload.wh_company_name).trim()
+          : null;
+        const wh_gstin = payload.wh_gstin
+          ? String(payload.wh_gstin).trim()
+          : null;
+        const wh_address = payload.wh_address
+          ? String(payload.wh_address).trim()
+          : null;
+        const wh_state_name = payload.wh_state_name
+          ? String(payload.wh_state_name).trim()
+          : null;
+        const wh_state_code = payload.wh_state_code
+          ? String(payload.wh_state_code).trim()
+          : null;
+        const wh_fssai = payload.wh_fssai
+          ? String(payload.wh_fssai).trim()
+          : null;
+        const wh_bank_name = payload.wh_bank_name
+          ? String(payload.wh_bank_name).trim()
+          : null;
+        const wh_account_number = payload.wh_account_number
+          ? String(payload.wh_account_number).trim()
+          : null;
+        const wh_branch_ifsc = payload.wh_branch_ifsc
+          ? String(payload.wh_branch_ifsc).trim()
+          : null;
+
+        const buyer_name = payload.buyer_name
+          ? String(payload.buyer_name).trim()
+          : null;
+        const buyer_gstin = payload.buyer_gstin
+          ? String(payload.buyer_gstin).trim()
+          : null;
+        const buyer_address = payload.buyer_address
+          ? String(payload.buyer_address).trim()
+          : null;
+        const buyer_contact = payload.buyer_contact
+          ? String(payload.buyer_contact).trim()
+          : null;
+        const buyer_phone = payload.buyer_phone
+          ? String(payload.buyer_phone).trim()
+          : null;
+        const buyer_email = payload.buyer_email
+          ? String(payload.buyer_email).trim()
+          : null;
+        const buyer_state_name = payload.buyer_state_name
+          ? String(payload.buyer_state_name).trim()
+          : null;
+        const buyer_state_code = payload.buyer_state_code
+          ? String(payload.buyer_state_code).trim()
+          : null;
+        const place_of_supply = payload.place_of_supply
+          ? String(payload.place_of_supply).trim()
+          : null;
+
+        const tax_type = payload.tax_type === "inter" ? "inter" : "intra";
+        const cgst_amount = Number(payload.cgst_amount) || 0;
+        const sgst_amount = Number(payload.sgst_amount) || 0;
+        const igst_amount = Number(payload.igst_amount) || 0;
 
         if (!client_id || !invoice_number || !invoice_date) {
           return new Response(
@@ -4733,13 +5022,30 @@ export default {
           }
         }
 
+        // Fetch existing main item IDs so we can cascade-delete their sub items
+        const existingMainItems = await env.DB.prepare(
+          "SELECT id FROM billing_main_items WHERE billing_id = ?",
+        )
+          .bind(billingId)
+          .all();
+        const existingMainIds = (existingMainItems.results || []).map(
+          (r) => r.id,
+        );
+
         const batchStatements = [
           env.DB.prepare(
             `UPDATE billing SET
               client_id = ?, invoice_number = ?, invoice_date = ?, due_date = ?,
-              billing_period_from = ?, billing_period_to = ?, reference_number = ?,
-              subtotal = ?, tax = ?, discount = ?, other_charges = ?, grand_total = ?,
-              notes = ?, updated_by_user_id = ?, updated_at = CURRENT_TIMESTAMP
+              billing_period_from = ?, billing_period_to = ?, reference_number = ?, reference_date = ?,
+              buyers_order_no = ?, buyers_order_date = ?, dispatch_doc_no = ?, dispatch_through = ?,
+              destination = ?, terms_of_delivery = ?, delivery_note = ?, delivery_note_date = ?,
+              wh_company_name = ?, wh_gstin = ?, wh_address = ?, wh_state_name = ?, wh_state_code = ?,
+              wh_fssai = ?, wh_bank_name = ?, wh_account_number = ?, wh_branch_ifsc = ?,
+              buyer_name = ?, buyer_gstin = ?, buyer_address = ?, buyer_contact = ?, buyer_phone = ?,
+              buyer_email = ?, buyer_state_name = ?, buyer_state_code = ?, place_of_supply = ?,
+              tax_type = ?, subtotal = ?, cgst_amount = ?, sgst_amount = ?, igst_amount = ?, round_off = ?,
+              discount = ?, other_charges = ?, grand_total = ?, notes = ?, other_ref = ?,
+              updated_by_user_id = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?`,
           ).bind(
             client_id,
@@ -4749,43 +5055,110 @@ export default {
             billing_period_from,
             billing_period_to,
             reference_number,
+            reference_date,
+            buyers_order_no,
+            buyers_order_date,
+            dispatch_doc_no,
+            dispatch_through,
+            destination,
+            terms_of_delivery,
+            delivery_note,
+            delivery_note_date,
+            wh_company_name,
+            wh_gstin,
+            wh_address,
+            wh_state_name,
+            wh_state_code,
+            wh_fssai,
+            wh_bank_name,
+            wh_account_number,
+            wh_branch_ifsc,
+            buyer_name,
+            buyer_gstin,
+            buyer_address,
+            buyer_contact,
+            buyer_phone,
+            buyer_email,
+            buyer_state_name,
+            buyer_state_code,
+            place_of_supply,
+            tax_type,
             subtotal,
-            tax,
+            cgst_amount,
+            sgst_amount,
+            igst_amount,
+            round_off,
             discount,
             other_charges,
             grand_total,
             notes,
+            other_ref,
             auth.context.user_id,
-            billingId,
-          ),
-          // Simplest reliable way to sync line items without an ordering column: wipe and re-insert
-          env.DB.prepare("DELETE FROM billing_items WHERE billing_id = ?").bind(
             billingId,
           ),
         ];
 
-        items.forEach((item) => {
-          const itemId = "bit_" + crypto.randomUUID();
+        // Wipe and re-insert main+sub items (sub items cascade via FK on main item delete)
+        if (existingMainIds.length > 0) {
+          const placeholders = existingMainIds.map(() => "?").join(",");
           batchStatements.push(
             env.DB.prepare(
-              `INSERT INTO billing_items (id, billing_id, description, quantity, unit, rate, amount)
+              `DELETE FROM billing_sub_items WHERE main_item_id IN (${placeholders})`,
+            ).bind(...existingMainIds),
+          );
+        }
+        batchStatements.push(
+          env.DB.prepare(
+            "DELETE FROM billing_main_items WHERE billing_id = ?",
+          ).bind(billingId),
+        );
+
+        items.forEach((item, idx) => {
+          const mainItemId = "bmi_" + crypto.randomUUID();
+          batchStatements.push(
+            env.DB.prepare(
+              `INSERT INTO billing_main_items (id, billing_id, main_description, hsn_sac, tax_rate, amount, sort_order)
                VALUES (?, ?, ?, ?, ?, ?, ?)`,
             ).bind(
-              itemId,
+              mainItemId,
               billingId,
-              String(item.description || "").trim(),
-              item.quantity !== undefined && item.quantity !== ""
-                ? Number(item.quantity)
-                : null,
-              item.unit ? String(item.unit).trim() : null,
-              item.rate !== undefined && item.rate !== ""
-                ? Number(item.rate)
-                : null,
-              item.amount !== undefined && item.amount !== ""
-                ? Number(item.amount)
-                : null,
+              String(item.main_description || item.description || "").trim(),
+              String(item.hsn_sac || "").trim(),
+              Number(item.tax_rate) || 0,
+              Number(item.amount) || 0,
+              idx,
             ),
           );
+
+          const subItems = Array.isArray(item.sub_items) ? item.sub_items : [];
+          subItems.forEach((sub, subIdx) => {
+            const subItemId = "bsi_" + crypto.randomUUID();
+            batchStatements.push(
+              env.DB.prepare(
+                `INSERT INTO billing_sub_items (id, main_item_id, sub_description, quantity, unit, rate, amount, sort_order)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+              ).bind(
+                subItemId,
+                mainItemId,
+                sub.sub_description ? String(sub.sub_description).trim() : null,
+                sub.quantity !== undefined &&
+                  sub.quantity !== null &&
+                  sub.quantity !== ""
+                  ? Number(sub.quantity)
+                  : null,
+                sub.unit ? String(sub.unit).trim() : null,
+                sub.rate !== undefined && sub.rate !== null && sub.rate !== ""
+                  ? Number(sub.rate)
+                  : null,
+                sub.amount !== undefined &&
+                  sub.amount !== null &&
+                  sub.amount !== ""
+                  ? Number(sub.amount)
+                  : null,
+                subIdx,
+              ),
+            );
+          });
         });
 
         await env.DB.batch(batchStatements);
