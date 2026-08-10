@@ -1786,10 +1786,8 @@ export default {
             if (targetPutawayQty > 0) {
               batchStatements.push(
                 env.DB.prepare(
-                  `INSERT INTO putaway_task_items (
-                    id, putaway_task_id, item_code, item_description, quantity_to_place, 
-                    category, expiry_date, manufacturing_date, shipment_line_item_id, uom, batch_number, case_conversion_qty
-                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                  `INSERT INTO putaway_task_items (id, putaway_task_id, item_code, item_description, quantity_to_place, category, expiry_date, manufacturing_date, shipment_line_item_id, uom, batch_number)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 ).bind(
                   "pti_" + crypto.randomUUID(),
                   putawayTaskId,
@@ -1802,7 +1800,6 @@ export default {
                   lineItemId,
                   verifiedUom,
                   resolvedBatchNumber,
-                  cleanFloat(item.case_conversion_qty),
                 ),
               );
             }
@@ -2322,7 +2319,12 @@ export default {
         }
 
         const originalItems = await env.DB.prepare(
-          "SELECT id, item_code, quantity_to_place, category, manufacturing_date, expiry_date, batch_number, shipment_line_item_id, uom, case_conversion_qty FROM putaway_task_items WHERE putaway_task_id = ?",
+          `SELECT pti.id, pti.item_code, pti.quantity_to_place, pti.category, pti.manufacturing_date, 
+          pti.expiry_date, pti.batch_number, pti.shipment_line_item_id, pti.uom, 
+          sli.case_conversion_qty 
+          FROM putaway_task_items pti
+          LEFT JOIN shipment_line_items sli ON pti.shipment_line_item_id = sli.id
+          WHERE pti.putaway_task_id = ?`,
         )
           .bind(putaway_task_id)
           .all();
