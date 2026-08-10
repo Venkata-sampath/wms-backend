@@ -1786,8 +1786,10 @@ export default {
             if (targetPutawayQty > 0) {
               batchStatements.push(
                 env.DB.prepare(
-                  `INSERT INTO putaway_task_items (id, putaway_task_id, item_code, item_description, quantity_to_place, category, expiry_date, manufacturing_date, shipment_line_item_id, uom, batch_number)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                  `INSERT INTO putaway_task_items (
+                    id, putaway_task_id, item_code, item_description, quantity_to_place, 
+                    category, expiry_date, manufacturing_date, shipment_line_item_id, uom, batch_number, case_conversion_qty
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 ).bind(
                   "pti_" + crypto.randomUUID(),
                   putawayTaskId,
@@ -1800,6 +1802,7 @@ export default {
                   lineItemId,
                   verifiedUom,
                   resolvedBatchNumber,
+                  cleanFloat(item.case_conversion_qty),
                 ),
               );
             }
@@ -2319,7 +2322,7 @@ export default {
         }
 
         const originalItems = await env.DB.prepare(
-          "SELECT id, item_code, quantity_to_place, category, manufacturing_date, expiry_date, batch_number, shipment_line_item_id, uom FROM putaway_task_items WHERE putaway_task_id = ?",
+          "SELECT id, item_code, quantity_to_place, category, manufacturing_date, expiry_date, batch_number, shipment_line_item_id, uom, case_conversion_qty FROM putaway_task_items WHERE putaway_task_id = ?",
         )
           .bind(putaway_task_id)
           .all();
