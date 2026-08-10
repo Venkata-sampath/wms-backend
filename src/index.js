@@ -4888,6 +4888,99 @@ export default {
       }
     }
 
+    // GET /api/hsn-sac -> List all HSN/SAC codes for this warehouse
+    if (request.method === "GET" && url.pathname === "/api/hsn-sac") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+
+      try {
+        const rows = await env.DB.prepare(
+          "SELECT id, code, tax_percentage FROM hsn_sac_codes WHERE warehouse_id = ? ORDER BY code ASC",
+        )
+          .bind(auth.context.warehouse_id)
+          .all();
+
+        return new Response(JSON.stringify({ codes: rows.results || [] }), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    // POST /api/hsn-sac -> Create a new HSN/SAC Code
+    if (request.method === "POST" && url.pathname === "/api/hsn-sac") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+      if (auth.context.role !== "admin") {
+        return new Response(
+          JSON.stringify({ error: "Forbidden: Admin access required." }),
+          { status: 403, headers: corsHeaders },
+        );
+      }
+
+      try {
+        const { code, tax_percentage } = await request.json();
+        const cleanCode = String(code || "").trim();
+        const parsedTax = Number(tax_percentage);
+
+        if (!cleanCode || isNaN(parsedTax) || parsedTax < 0) {
+          return new Response(
+            JSON.stringify({
+              error: "Valid Code and Tax Percentage are required.",
+            }),
+            {
+              status: 400,
+              headers: corsHeaders,
+            },
+          );
+        }
+
+        const id = "hsn_" + crypto.randomUUID();
+        await env.DB.prepare(
+          "INSERT INTO hsn_sac_codes (id, warehouse_id, code, tax_percentage) VALUES (?, ?, ?, ?)",
+        )
+          .bind(id, auth.context.warehouse_id, cleanCode, parsedTax)
+          .run();
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            item: { id, code: cleanCode, tax_percentage: parsedTax },
+          }),
+          {
+            status: 201,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      } catch (err) {
+        if (err.message.includes("UNIQUE constraint failed")) {
+          return new Response(
+            JSON.stringify({ error: "This HSN/SAC code already exists." }),
+            { status: 409, headers: corsHeaders },
+          );
+        }
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: corsHeaders,
+        });
+      }
+    }
+
     return new Response(JSON.stringify({ error: "Not Found" }), {
       status: 404,
       headers: { "Content-Type": "application/json", ...corsHeaders },
