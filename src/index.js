@@ -3108,7 +3108,7 @@ export default {
        LEFT JOIN users u_os ON u_os.id = osi.uploaded_by_user_id
        LEFT JOIN outbound_shipment_details osd ON osd.id = t.reference_id AND t.transaction_type = 'outbound'
        LEFT JOIN users u_outbound ON u_outbound.id = osd.verified_by_user_id
-       WHERE t.warehouse_id = ? AND t.transaction_type IN ('inbound', 'opening_stock', 'outbound')
+       WHERE t.warehouse_id = ? AND t.transaction_type IN ('inbound', 'opening_stock', 'outbound', 'stock_adjustment')
        ORDER BY t.created_at DESC`,
         )
           .bind(auth.context.warehouse_id)
@@ -3283,6 +3283,19 @@ export default {
               outbound_shipment_line_items: lineItems.results || [],
               picking_tasks: pickingTasks.results || [],
             };
+          },
+          stock_adjustment: async () => {
+            const adj = await env.DB.prepare(
+              `SELECT sa.*, u.username AS performed_by, cl.name AS client_name, cl.code AS client_code
+               FROM stock_adjustments sa
+               LEFT JOIN users u ON u.id = sa.created_by_user_id
+               LEFT JOIN clients cl ON sa.client_id = cl.id
+               WHERE sa.id = ? AND sa.warehouse_id = ?`,
+            )
+              .bind(transaction.reference_id, auth.context.warehouse_id)
+              .first();
+
+            return { adjustment_detail: adj || null };
           },
         };
 
@@ -5249,6 +5262,145 @@ export default {
         return new Response(JSON.stringify({ error: err.message }), {
           status: 500,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    // =========================================================================
+    // POST /api/inventory/adjust -> Stock Adjustment Endpoint
+    // =========================================================================
+    if (request.method === "POST" && url.pathname === "/api/inventory/adjust") {
+      const auth = await getTenantContext(request, env);
+      if (!auth.success) {
+        return new Response(JSON.stringify({ error: auth.error }), {
+          status: auth.status,
+          headers: corsHeaders,
+        });
+      }
+
+      if (auth.context.role === "viewer") {
+        return new Response(
+          JSON.stringify({
+            error: "Operation Forbidden: Viewers cannot make adjustments.",
+          }),
+          { status: 403, headers: corsHeaders },
+        );
+      }
+
+      try {
+        const { inventory_id, physical_quantity, remarks } =
+          await request.json();
+
+        if (!inventory_id || physical_quantity === undefined || !remarks) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "Inventory ID, physical quantity, and remarks are mandatory.",
+            }),
+            { status: 400, headers: corsHeaders },
+          );
+        }
+
+        const invRow = await env.DB.prepare(
+          "SELECT * FROM inventory WHERE id = ? AND warehouse_id = ?",
+        )
+          .bind(inventory_id, auth.context.warehouse_id)
+          .first();
+
+        if (!invRow) {
+          return new Response(
+            JSON.stringify({ error: "Inventory record not found." }),
+            { status: 404, headers: corsHeaders },
+          );
+        }
+
+        const systemQuantity = invRow.quantity;
+        const delta = physical_quantity - systemQuantity;
+
+        if (delta === 0) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "Physical quantity matches current system quantity. No adjustment needed.",
+            }),
+            { status: 400, headers: corsHeaders },
+          );
+        }
+
+        const adjustmentId = "adj_" + crypto.randomUUID();
+        const transactionId = "txn_" + crypto.randomUUID();
+
+        // Batch Database Updates
+        await env.DB.batch([
+          // 1. Log Stock Adjustment details
+          env.DB.prepare(
+            `
+            INSERT INTO stock_adjustments (
+              id, warehouse_id, client_id, stock_owner_id, inventory_id, location_id,
+              item_code, item_description, batch_number, system_quantity, physical_quantity,
+              delta_quantity, uom, remarks, created_by_user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `,
+          ).bind(
+            adjustmentId,
+            auth.context.warehouse_id,
+            invRow.client_id,
+            invRow.stock_owner_id,
+            invRow.id,
+            invRow.location_id,
+            invRow.item_code,
+            invRow.item_description,
+            invRow.batch_number,
+            systemQuantity,
+            physical_quantity,
+            delta,
+            invRow.uom,
+            remarks,
+            auth.context.user_id,
+          ),
+
+          // 2. Update live inventory quantity
+          env.DB.prepare(
+            `
+            UPDATE inventory SET quantity = ? WHERE id = ? AND warehouse_id = ?
+          `,
+          ).bind(physical_quantity, inventory_id, auth.context.warehouse_id),
+
+          // 3. Write transaction audit record
+          env.DB.prepare(
+            `
+            INSERT INTO transactions (
+              id, warehouse_id, reference_id, client_id, transaction_type,
+              status, created_by_user_id, completed_by_user_id, created_at, completed_at, remarks
+            ) VALUES (?, ?, ?, ?, 'stock_adjustment', 'completed', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+          `,
+          ).bind(
+            transactionId,
+            auth.context.warehouse_id,
+            adjustmentId,
+            invRow.client_id,
+            auth.context.user_id,
+            auth.context.user_id,
+            remarks,
+          ),
+        ]);
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            message: `Stock adjustment posted successfully (Delta: ${delta > 0 ? "+" : ""}${delta} ${invRow.uom}).`,
+            adjustment_id: adjustmentId,
+            transaction_id: transactionId,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json", ...corsHeaders },
+          },
+        );
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
         });
       }
     }
