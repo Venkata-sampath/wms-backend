@@ -528,11 +528,6 @@ export default {
     }
 
     const url = new URL(request.url);
-
-    // =========================================================================
-    // NEW SNIPPET: PLATFORM SUPER-ADMIN CONTROL PLANE ENDPOINTS
-    // =========================================================================
-
     // -------------------------------------------------------------------------
     // 1. ENDPOINT: Onboard New Warehouse Tenant & Admin (POST /api/super/warehouses)
     // -------------------------------------------------------------------------
@@ -1322,11 +1317,6 @@ export default {
       }
     }
 
-    // =========================================================================
-    // ENDPOINT: Outbound AI Upload — mirrors /api/inbound/upload exactly, but
-    // stages into outbound_shipments and tags document_pages as 'outbound' so
-    // the shared OCR/LLM pipeline can dispatch the right prompt + aggregator.
-    // =========================================================================
     if (request.method === "POST" && url.pathname === "/api/outbound/upload") {
       const auth = await getTenantContext(request, env);
       if (!auth.success) {
@@ -3402,10 +3392,7 @@ export default {
     }
 
     // =========================================================================
-    // POST /api/outbound/verify -> Validation-only. Never writes to the DB.
-    // Used by BOTH the AI-upload flow and Manual Entry (there is no separate
-    // manual-create endpoint — Manual Entry just posts a blank-form-filled
-    // payload here first).
+    // POST /api/outbound/verify
     // =========================================================================
     if (request.method === "POST" && url.pathname === "/api/outbound/verify") {
       const auth = await getTenantContext(request, env);
@@ -3539,10 +3526,7 @@ export default {
     }
 
     // =========================================================================
-    // POST /api/outbound/commit -> All database writes happen here. Re-runs
-    // allocation fresh against current stock (does NOT trust the allocation
-    // the client received from /api/outbound/verify) so a race between two
-    // concurrent orders never oversells the same inventory.
+    // POST /api/outbound/commit
     // =========================================================================
     if (request.method === "POST" && url.pathname === "/api/outbound/commit") {
       const auth = await getTenantContext(request, env);
@@ -3938,8 +3922,6 @@ export default {
 
     // =========================================================================
     // POST /api/picking/complete -> quantity -= picked_quantity, reserved_quantity -= picked_quantity.
-    // Never deletes inventory rows. Matches picking_task_items back to inventory
-    // via the stored inventory_id (no ambiguous re-matching on description fields).
     // =========================================================================
     if (request.method === "POST" && url.pathname === "/api/picking/complete") {
       const auth = await getTenantContext(request, env);
@@ -4098,17 +4080,6 @@ export default {
         });
       }
     }
-
-    // =========================================================================
-    // BILLING MODULE — manual invoice creation. No automatic calculation of
-    // any kind; every numeric field is entered and trusted as-is from the
-    // client. status is binary: 'pending' -> 'paid' (one-way, via mark-paid).
-    // Hierarchical items: billing_main_items (HSN/SAC category) each with
-    // billing_sub_items (breakdown lines). tax_type is 'intra' (CGST+SGST)
-    // or 'inter' (IGST), derived client-side from wh_state_code vs the
-    // buyer's place_of_supply state code, but trusted as sent since the
-    // client already computed cgst/sgst/igst amounts consistently with it.
-    // =========================================================================
 
     // -------------------------------------------------------------------------
     // GET /api/billing -> List bills for this warehouse (filters: search, client_id, status)
@@ -5314,6 +5285,32 @@ export default {
           );
         }
 
+        // Numeric/negative guard — never trust client-side validation alone.
+        if (
+          typeof physical_quantity !== "number" ||
+          !Number.isFinite(physical_quantity) ||
+          physical_quantity < 0
+        ) {
+          return new Response(
+            JSON.stringify({
+              error: "Physical quantity must be a valid non-negative number.",
+            }),
+            { status: 400, headers: corsHeaders },
+          );
+        }
+
+        // Reserved-quantity guard — physical count can't be less than what's
+        // already committed to pending picking tasks, or available_quantity
+        // would go negative.
+        if (physical_quantity < invRow.reserved_quantity) {
+          return new Response(
+            JSON.stringify({
+              error: `Physical quantity (${physical_quantity}) cannot be less than the reserved quantity (${invRow.reserved_quantity}) currently allocated to pending picks.`,
+            }),
+            { status: 400, headers: corsHeaders },
+          );
+        }
+
         const systemQuantity = invRow.quantity;
         const delta = physical_quantity - systemQuantity;
 
@@ -5332,21 +5329,20 @@ export default {
 
         // Batch Database Updates
         await env.DB.batch([
-          // 1. Log Stock Adjustment details
+          // 1. Log Stock Adjustment details (14 columns)
           env.DB.prepare(
             `
             INSERT INTO stock_adjustments (
-              id, warehouse_id, client_id, stock_owner_id, inventory_id, location_id,
+              id, warehouse_id, client_id, stock_owner_id, location_id,
               item_code, item_description, batch_number, system_quantity, physical_quantity,
               delta_quantity, uom, remarks, created_by_user_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `,
           ).bind(
             adjustmentId,
             auth.context.warehouse_id,
             invRow.client_id,
             invRow.stock_owner_id,
-            invRow.id,
             invRow.location_id,
             invRow.item_code,
             invRow.item_description,
