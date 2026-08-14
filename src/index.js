@@ -5285,7 +5285,7 @@ export default {
           );
         }
 
-        // Numeric/negative guard — never trust client-side validation alone.
+        // Numeric/negative guard
         if (
           typeof physical_quantity !== "number" ||
           !Number.isFinite(physical_quantity) ||
@@ -5299,9 +5299,7 @@ export default {
           );
         }
 
-        // Reserved-quantity guard — physical count can't be less than what's
-        // already committed to pending picking tasks, or available_quantity
-        // would go negative.
+        // Reserved-quantity guard
         if (physical_quantity < invRow.reserved_quantity) {
           return new Response(
             JSON.stringify({
@@ -5311,6 +5309,7 @@ export default {
           );
         }
 
+        // Calculate delta against Total Quantity
         const systemQuantity = invRow.quantity;
         const delta = physical_quantity - systemQuantity;
 
@@ -5327,9 +5326,9 @@ export default {
         const adjustmentId = "adj_" + crypto.randomUUID();
         const transactionId = "txn_" + crypto.randomUUID();
 
-        // Batch Database Updates
+        // Batch Database Updates using delta to prevent race conditions
         await env.DB.batch([
-          // 1. Log Stock Adjustment details (14 columns)
+          // 1. Log Stock Adjustment details
           env.DB.prepare(
             `
             INSERT INTO stock_adjustments (
@@ -5355,12 +5354,12 @@ export default {
             auth.context.user_id,
           ),
 
-          // 2. Update live inventory quantity
+          // 2. Safely apply the delta change to the live quantity
           env.DB.prepare(
             `
-            UPDATE inventory SET quantity = ? WHERE id = ? AND warehouse_id = ?
+            UPDATE inventory SET quantity = quantity + ? WHERE id = ? AND warehouse_id = ?
           `,
-          ).bind(physical_quantity, inventory_id, auth.context.warehouse_id),
+          ).bind(delta, inventory_id, auth.context.warehouse_id),
 
           // 3. Write transaction audit record
           env.DB.prepare(
