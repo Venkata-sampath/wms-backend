@@ -5386,17 +5386,17 @@ export default {
           const lineItemId = "saji_" + crypto.randomUUID();
           const { invRow, physicalQuantity, systemQuantity, delta } = resolved;
 
+          // Insert into historical ledger (without inventory_id)
           batchStatements.push(
             env.DB.prepare(
               `INSERT INTO stock_adjustment_items (
-                id, stock_adjustment_id, inventory_id, stock_owner_id, location_id,
+                id, stock_adjustment_id, stock_owner_id, location_id,
                 item_code, item_description, batch_number, uom, system_quantity,
                 physical_quantity, delta_quantity, created_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
             ).bind(
               lineItemId,
               adjustmentId,
-              invRow.id,
               invRow.stock_owner_id,
               invRow.location_id,
               invRow.item_code,
@@ -5409,7 +5409,7 @@ export default {
             ),
           );
 
-          // Apply delta to live inventory
+          // Apply delta to live inventory using the invRow.id (which is the inventory_id)
           batchStatements.push(
             env.DB.prepare(
               `UPDATE inventory SET quantity = quantity + ? WHERE id = ? AND warehouse_id = ?`,
