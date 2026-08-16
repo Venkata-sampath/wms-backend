@@ -7,6 +7,7 @@ import { getTenantContext } from "../middleware/authMiddleware.js";
  * @description Provisions a new warehouse tenant along with an initial warehouse admin user account.
  * @access Super Admin Only
  *
+ * @body {string} warehouse_id - Super-Admin-chosen unique tenant identifier (used at login to disambiguate usernames).
  * @body {string} company_name - Legal or commercial name of the company/warehouse.
  * @body {string} [initial_status="trial"] - Initial subscription status ("active", "trial", or "suspended").
  * @body {string} admin_username - Username for the primary warehouse admin.
@@ -31,6 +32,7 @@ export async function onboardWarehouseHandler(request, env) {
 
   try {
     const {
+      warehouse_id,
       company_name,
       initial_status,
       admin_username,
@@ -40,7 +42,7 @@ export async function onboardWarehouseHandler(request, env) {
     } = await request.json();
 
     // Validate inputs (status can be 'active' or 'trial')
-    if (!company_name || !admin_username || !admin_password) {
+    if (!warehouse_id || !company_name || !admin_username || !admin_password) {
       return new Response(
         JSON.stringify({
           error: "Missing required onboarding parameters.",
@@ -52,7 +54,27 @@ export async function onboardWarehouseHandler(request, env) {
       );
     }
 
-    const warehouseId = "wh_" + crypto.randomUUID();
+    // Normalize the tenant identifier: lowercase, hyphenated, login-friendly.
+    // This is now typed by the Super Admin instead of auto-generated, so it doubles
+    // as the readable value staff will type on the login screen alongside their username.
+    const normalizedWarehouseId = String(warehouse_id)
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, "-");
+
+    if (!/^[a-z0-9-]+$/.test(normalizedWarehouseId)) {
+      return new Response(
+        JSON.stringify({
+          error:
+            "Warehouse ID may only contain lowercase letters, numbers, and hyphens.",
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
     const adminUserId = "usr_" + crypto.randomUUID();
 
     // FIXED: Changed adminPassword to admin_password to match the destructured variable above
@@ -69,7 +91,7 @@ export async function onboardWarehouseHandler(request, env) {
         VALUES (?, ?, ?, ?, ?)
       `,
       ).bind(
-        warehouseId,
+        normalizedWarehouseId,
         company_name,
         gstinValue,
         addressValue,
@@ -81,14 +103,19 @@ export async function onboardWarehouseHandler(request, env) {
         INSERT INTO users (id, warehouse_id, username, password_hash, role, is_active)
         VALUES (?, ?, ?, ?, 'admin', 1)
       `,
-      ).bind(adminUserId, warehouseId, admin_username, adminPasswordHash),
+      ).bind(
+        adminUserId,
+        normalizedWarehouseId,
+        admin_username,
+        adminPasswordHash,
+      ),
     ]);
 
     return new Response(
       JSON.stringify({
         message:
           "New warehouse tenant and administrator provisioned successfully.",
-        warehouse_id: warehouseId,
+        warehouse_id: normalizedWarehouseId,
         admin_user_id: adminUserId,
       }),
       {
@@ -98,9 +125,13 @@ export async function onboardWarehouseHandler(request, env) {
     );
   } catch (error) {
     if (error.message.includes("UNIQUE constraint failed")) {
+      // Could be a duplicate warehouse id (primary key) OR a duplicate admin_username
+      // within that (new, still-uncommitted) warehouse — both surface the same SQLite error text,
+      // so we give a message that covers either cause.
       return new Response(
         JSON.stringify({
-          error: "The provided admin username is already registered.",
+          error:
+            "This Warehouse ID is already taken, or the admin username conflicts with an existing account.",
         }),
         {
           status: 409,
@@ -125,7 +156,7 @@ export async function onboardWarehouseHandler(request, env) {
  * @description Updates the subscription status state for a targeted warehouse tenant.
  * @access Super Admin Only
  *
- * @body {string} target_warehouse_id - Unique UUID of the target warehouse.
+ * @body {string} target_warehouse_id - Unique identifier of the target warehouse.
  * @body {string} set_status - New subscription status state ("active", "suspended", or "trial").
  *
  * @returns {200} JSON - { message: string }

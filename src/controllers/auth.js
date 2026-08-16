@@ -8,7 +8,8 @@ import { getTenantContext } from "../middleware/authMiddleware.js";
  * Returns the user profile including warehouse billing information.
  * @access Public
  *
- * @body {string} username - The user's account username.
+ * @body {string} warehouse_id - The tenant warehouse identifier (chosen by Super Admin at onboarding).
+ * @body {string} username - The user's account username (unique within that warehouse).
  * @body {string} password - The user's account password.
  *
  * @returns {200} JSON - { message: "...", token: "...", user: { ... } }
@@ -16,11 +17,13 @@ import { getTenantContext } from "../middleware/authMiddleware.js";
  */
 export async function loginHandler(request, env) {
   try {
-    const { username, password } = await request.json();
+    const { warehouse_id, username, password } = await request.json();
 
-    if (!username || !password) {
+    if (!warehouse_id || !username || !password) {
       return new Response(
-        JSON.stringify({ error: "Username and password are required." }),
+        JSON.stringify({
+          error: "Warehouse ID, username, and password are required.",
+        }),
         {
           status: 400,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -28,21 +31,24 @@ export async function loginHandler(request, env) {
       );
     }
 
-    // LOOKUP UPDATE: Added w.company_name, w.gstin, w.address (used on billing invoices) to extract the warehouse profile
+    // LOOKUP UPDATE: Scoped by warehouse_id so usernames only need to be unique within a tenant,
+    // not across the whole platform. Added w.company_name, w.gstin, w.address for billing invoices.
     const userRow = await env.DB.prepare(
       `
       SELECT u.id, u.username, u.password_hash, u.role, u.is_active, u.warehouse_id, w.subscription_status, w.company_name, w.gstin, w.address
       FROM users u
       LEFT JOIN warehouses w ON u.warehouse_id = w.id
-      WHERE u.username = ?
+      WHERE u.username = ? AND u.warehouse_id = ?
     `,
     )
-      .bind(username)
+      .bind(username, warehouse_id)
       .first();
 
     if (!userRow) {
       return new Response(
-        JSON.stringify({ error: "Invalid username or password." }),
+        JSON.stringify({
+          error: "Invalid warehouse ID, username, or password.",
+        }),
         {
           status: 401,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -56,7 +62,9 @@ export async function loginHandler(request, env) {
     );
     if (!isPasswordValid) {
       return new Response(
-        JSON.stringify({ error: "Invalid username or password." }),
+        JSON.stringify({
+          error: "Invalid warehouse ID, username, or password.",
+        }),
         {
           status: 401,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -137,7 +145,7 @@ export async function loginHandler(request, env) {
  * @description Registers a new sub-account linked to the admin's tenant warehouse.
  * @access Tenant Admin Only
  *
- * @body {string} username - The desired username for the new account.
+ * @body {string} username - The desired username for the new account (unique within this warehouse).
  * @body {string} password - The secure password for the new account.
  * @body {string} [role="operator"] - Optional assigned role parameter (defaults to "operator").
  *
@@ -216,7 +224,7 @@ export async function registerOperatorHandler(request, env) {
     if (error.message.includes("UNIQUE constraint failed")) {
       return new Response(
         JSON.stringify({
-          error: "Username already exists on the platform registry.",
+          error: "This username is already taken within your warehouse.",
         }),
         {
           status: 409,
