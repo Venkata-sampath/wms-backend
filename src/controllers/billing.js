@@ -986,17 +986,17 @@ export async function updateBillHandler(request, env, matchParams) {
     const batchStatements = [
       env.DB.prepare(
         `UPDATE billing SET
-              client_id = ?, invoice_number = ?, invoice_date = ?, due_date = ?,
-              billing_period_from = ?, billing_period_to = ?, reference_number = ?, reference_date = ?,
-              buyers_order_no = ?, buyers_order_date = ?, dispatch_doc_no = ?, dispatch_through = ?,
-              destination = ?, terms_of_delivery = ?, delivery_note = ?, delivery_note_date = ?,
-              wh_company_name = ?, wh_gstin = ?, wh_address = ?, wh_state_name = ?, wh_state_code = ?,
-              wh_fssai = ?, wh_bank_name = ?, wh_account_number = ?, wh_branch_ifsc = ?, wh_contact = ?, wh_email = ?,
-              buyer_name = ?, buyer_gstin = ?, buyer_address = ?, buyer_state_name = ?, buyer_state_code = ?, place_of_supply = ?,
-              tax_type = ?, subtotal = ?, cgst_amount = ?, sgst_amount = ?, igst_amount = ?, round_off = ?,
-              discount, other_charges = ?, grand_total = ?, notes = ?, other_ref = ?,
-              updated_by_user_id = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?`,
+          client_id = ?, invoice_number = ?, invoice_date = ?, due_date = ?,
+          billing_period_from = ?, billing_period_to = ?, reference_number = ?, reference_date = ?,
+          buyers_order_no = ?, buyers_order_date = ?, dispatch_doc_no = ?, dispatch_through = ?,
+          destination = ?, terms_of_delivery = ?, delivery_note = ?, delivery_note_date = ?,
+          wh_company_name = ?, wh_gstin = ?, wh_address = ?, wh_state_name = ?, wh_state_code = ?,
+          wh_fssai = ?, wh_bank_name = ?, wh_account_number = ?, wh_branch_ifsc = ?, wh_contact = ?, wh_email = ?,
+          buyer_name = ?, buyer_gstin = ?, buyer_address = ?, buyer_state_name = ?, buyer_state_code = ?, place_of_supply = ?,
+          tax_type = ?, subtotal = ?, cgst_amount = ?, sgst_amount = ?, igst_amount = ?, round_off = ?,
+          discount = ?, other_charges = ?, grand_total = ?, notes = ?, other_ref = ?,
+          updated_by_user_id = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?`,
       ).bind(
         client_id,
         invoice_number,
