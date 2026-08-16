@@ -5,7 +5,7 @@
   "compatibility_date": "2026-06-25",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
-    "MODEL": "meta-llama/llama-3.1-8b-instruct",
+    "MODEL": "openai/gpt-oss-20b",
     "CLOUDINARY_CLOUD_NAME": "dyjam1u7r",
     "WORKER_SELF_URL": "https://wms.satyaramsl72.workers.dev",
     "RUNPOD_OCR_POD_ORCHESTRATOR_URL": "https://f9m6oer64mg7sf-8001.proxy.runpod.net",
