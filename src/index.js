@@ -3275,7 +3275,7 @@ export default {
             };
           },
           stock_adjustment: async () => {
-            const adj = await env.DB.prepare(
+            const adjHeader = await env.DB.prepare(
               `SELECT sa.*, u.username AS performed_by, cl.name AS client_name, cl.code AS client_code
                FROM stock_adjustments sa
                LEFT JOIN users u ON u.id = sa.created_by_user_id
@@ -3285,7 +3285,24 @@ export default {
               .bind(transaction.reference_id, auth.context.warehouse_id)
               .first();
 
-            return { adjustment_detail: adj || null };
+            let adjItems = [];
+            if (adjHeader) {
+              const itemsRes = await env.DB.prepare(
+                `SELECT sai.*, so.name AS stock_owner_name, so.code AS stock_owner_code
+                 FROM stock_adjustment_items sai
+                 LEFT JOIN stock_owners so ON sai.stock_owner_id = so.id
+                 WHERE sai.stock_adjustment_id = ?
+                 ORDER BY sai.created_at ASC`,
+              )
+                .bind(adjHeader.id)
+                .all();
+              adjItems = itemsRes.results || [];
+            }
+
+            return {
+              adjustment_header: adjHeader || null,
+              adjustment_items: adjItems,
+            };
           },
         };
 
@@ -5259,133 +5276,174 @@ export default {
       }
 
       try {
-        const { inventory_id, physical_quantity, remarks } =
-          await request.json();
+        const { remarks, items } = await request.json();
 
-        if (!inventory_id || physical_quantity === undefined || !remarks) {
+        if (!remarks || !String(remarks).trim()) {
           return new Response(
             JSON.stringify({
               error:
-                "Inventory ID, physical quantity, and remarks are mandatory.",
+                "Audit remarks/reasons are mandatory for stock adjustments.",
             }),
             { status: 400, headers: corsHeaders },
           );
         }
 
-        const invRow = await env.DB.prepare(
-          "SELECT * FROM inventory WHERE id = ? AND warehouse_id = ?",
-        )
-          .bind(inventory_id, auth.context.warehouse_id)
-          .first();
-
-        if (!invRow) {
-          return new Response(
-            JSON.stringify({ error: "Inventory record not found." }),
-            { status: 404, headers: corsHeaders },
-          );
-        }
-
-        // Numeric/negative guard
-        if (
-          typeof physical_quantity !== "number" ||
-          !Number.isFinite(physical_quantity) ||
-          physical_quantity < 0
-        ) {
-          return new Response(
-            JSON.stringify({
-              error: "Physical quantity must be a valid non-negative number.",
-            }),
-            { status: 400, headers: corsHeaders },
-          );
-        }
-
-        // Reserved-quantity guard
-        if (physical_quantity < invRow.reserved_quantity) {
-          return new Response(
-            JSON.stringify({
-              error: `Physical quantity (${physical_quantity}) cannot be less than the reserved quantity (${invRow.reserved_quantity}) currently allocated to pending picks.`,
-            }),
-            { status: 400, headers: corsHeaders },
-          );
-        }
-
-        // Calculate delta against Total Quantity
-        const systemQuantity = invRow.quantity;
-        const delta = physical_quantity - systemQuantity;
-
-        if (delta === 0) {
+        if (!Array.isArray(items) || items.length === 0) {
           return new Response(
             JSON.stringify({
               error:
-                "Physical quantity matches current system quantity. No adjustment needed.",
+                "At least one inventory item must be selected for adjustment.",
             }),
             { status: 400, headers: corsHeaders },
           );
+        }
+
+        const resolvedAdjustments = [];
+        let primaryClientId = null;
+
+        for (const item of items) {
+          const invId = item.inventory_id;
+          const physQty = Number(item.physical_quantity);
+
+          if (!invId) {
+            return new Response(
+              JSON.stringify({
+                error: "One or more items are missing an inventory identifier.",
+              }),
+              { status: 400, headers: corsHeaders },
+            );
+          }
+
+          if (isNaN(physQty) || !Number.isFinite(physQty) || physQty < 0) {
+            return new Response(
+              JSON.stringify({
+                error: `Physical quantity for item (${item.item_code || invId}) must be a valid non-negative number.`,
+              }),
+              { status: 400, headers: corsHeaders },
+            );
+          }
+
+          const invRow = await env.DB.prepare(
+            "SELECT * FROM inventory WHERE id = ? AND warehouse_id = ?",
+          )
+            .bind(invId, auth.context.warehouse_id)
+            .first();
+
+          if (!invRow) {
+            return new Response(
+              JSON.stringify({
+                error: `Inventory record ${invId} not found in this warehouse.`,
+              }),
+              { status: 404, headers: corsHeaders },
+            );
+          }
+
+          if (physQty < invRow.reserved_quantity) {
+            return new Response(
+              JSON.stringify({
+                error: `Counted quantity (${physQty}) for SKU '${invRow.item_code}' at location '${invRow.location_id}' cannot be lower than the reserved quantity (${invRow.reserved_quantity}).`,
+              }),
+              { status: 400, headers: corsHeaders },
+            );
+          }
+
+          const systemQty = Number(invRow.quantity);
+          const delta = physQty - systemQty;
+
+          if (!primaryClientId) {
+            primaryClientId = invRow.client_id;
+          }
+
+          resolvedAdjustments.push({
+            invRow,
+            physicalQuantity: physQty,
+            systemQuantity: systemQty,
+            delta,
+          });
         }
 
         const adjustmentId = "adj_" + crypto.randomUUID();
         const transactionId = "txn_" + crypto.randomUUID();
+        const batchStatements = [];
 
-        // Batch Database Updates using delta to prevent race conditions
-        await env.DB.batch([
-          // 1. Log Stock Adjustment details
+        // 1. Insert Adjustment Transaction Header
+        batchStatements.push(
           env.DB.prepare(
-            `
-            INSERT INTO stock_adjustments (
-              id, warehouse_id, client_id, stock_owner_id, location_id,
-              item_code, item_description, batch_number, system_quantity, physical_quantity,
-              delta_quantity, uom, remarks, created_by_user_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `,
+            `INSERT INTO stock_adjustments (
+              id, warehouse_id, client_id, remarks, created_by_user_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
           ).bind(
             adjustmentId,
             auth.context.warehouse_id,
-            invRow.client_id,
-            invRow.stock_owner_id,
-            invRow.location_id,
-            invRow.item_code,
-            invRow.item_description,
-            invRow.batch_number,
-            systemQuantity,
-            physical_quantity,
-            delta,
-            invRow.uom,
-            remarks,
+            primaryClientId,
+            String(remarks).trim(),
             auth.context.user_id,
           ),
+        );
 
-          // 2. Safely apply the delta change to the live quantity
-          env.DB.prepare(
-            `
-            UPDATE inventory SET quantity = quantity + ? WHERE id = ? AND warehouse_id = ?
-          `,
-          ).bind(delta, inventory_id, auth.context.warehouse_id),
+        // 2. Insert Line Items and Update Live Balances
+        for (const resolved of resolvedAdjustments) {
+          const lineItemId = "saji_" + crypto.randomUUID();
+          const { invRow, physicalQuantity, systemQuantity, delta } = resolved;
 
-          // 3. Write transaction audit record
+          batchStatements.push(
+            env.DB.prepare(
+              `INSERT INTO stock_adjustment_items (
+                id, stock_adjustment_id, inventory_id, stock_owner_id, location_id,
+                item_code, item_description, batch_number, uom, system_quantity,
+                physical_quantity, delta_quantity, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+            ).bind(
+              lineItemId,
+              adjustmentId,
+              invRow.id,
+              invRow.stock_owner_id,
+              invRow.location_id,
+              invRow.item_code,
+              invRow.item_description,
+              invRow.batch_number,
+              invRow.uom,
+              systemQuantity,
+              physicalQuantity,
+              delta,
+            ),
+          );
+
+          // Apply delta to live inventory
+          batchStatements.push(
+            env.DB.prepare(
+              `UPDATE inventory SET quantity = quantity + ? WHERE id = ? AND warehouse_id = ?`,
+            ).bind(delta, invRow.id, auth.context.warehouse_id),
+          );
+        }
+
+        // 3. Write Transaction Register Record
+        batchStatements.push(
           env.DB.prepare(
-            `
-            INSERT INTO transactions (
+            `INSERT INTO transactions (
               id, warehouse_id, reference_id, client_id, transaction_type,
               status, created_by_user_id, completed_by_user_id, created_at, completed_at, remarks
-            ) VALUES (?, ?, ?, ?, 'stock_adjustment', 'completed', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
-          `,
+            ) VALUES (?, ?, ?, ?, 'stock_adjustment', 'completed', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)`,
           ).bind(
             transactionId,
             auth.context.warehouse_id,
             adjustmentId,
-            invRow.client_id,
+            primaryClientId,
             auth.context.user_id,
             auth.context.user_id,
-            remarks,
+            String(remarks).trim(),
           ),
-        ]);
+        );
+
+        await env.DB.batch(batchStatements);
 
         return new Response(
           JSON.stringify({
             success: true,
-            message: `Stock adjustment posted successfully (Delta: ${delta > 0 ? "+" : ""}${delta} ${invRow.uom}).`,
+            message: `Batch stock adjustment completed successfully (${resolvedAdjustments.length} items updated).`,
             adjustment_id: adjustmentId,
             transaction_id: transactionId,
+            total_items: resolvedAdjustments.length,
           }),
           {
             status: 200,
