@@ -1,9 +1,14 @@
 import { corsHeaders } from "../utils/response.js";
 import { getTenantContext } from "../middleware/authMiddleware.js";
 
-// =========================================================================
-// GET /api/picking/pending
-// =========================================================================
+/**
+ * @api {GET} /api/picking/pending
+ * @description Retrieves all pending picking tasks for the tenant warehouse, enriched with client metadata, outbound shipment details, and associated item pick lines.
+ * @access Tenant User, Tenant Admin
+ *
+ * @returns {200} JSON - { tasks: Array<Object> }
+ * @returns {401|500} JSON - { error: string }
+ */
 export async function getPendingPickingTasksHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -66,9 +71,14 @@ export async function getPendingPickingTasksHandler(request, env) {
   }
 }
 
-// =========================================================================
-// GET /api/picking/completed
-// =========================================================================
+/**
+ * @api {GET} /api/picking/completed
+ * @description Retrieves historical completed picking tasks for the tenant warehouse with operator audit info and item pick lists.
+ * @access Tenant User, Tenant Admin
+ *
+ * @returns {200} JSON - { tasks: Array<Object> }
+ * @returns {401|500} JSON - { error: string }
+ */
 export async function getCompletedPickingTasksHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -133,9 +143,19 @@ export async function getCompletedPickingTasksHandler(request, env) {
   }
 }
 
-// =========================================================================
-// POST /api/picking/complete -> quantity -= picked_quantity, reserved_quantity -= picked_quantity.
-// =========================================================================
+/**
+ * @api {POST} /api/picking/complete
+ * @description Finalizes a picking task, decrements physical and reserved inventory stock balances, marks line items and task as completed, and closes the outbound shipment and transaction records.
+ * @access Tenant User, Tenant Admin (Viewers denied)
+ *
+ * @body {string} picking_task_id - Unique UUID of the picking task to complete.
+ * @body {Array<Object>} picked_items - List of picked item records.
+ * @body {string} picked_items[].picking_task_item_id - Unique UUID of the picking task line item.
+ * @body {number} [picked_items[].picked_quantity] - Actual quantity picked (defaults to original quantity_to_pick).
+ *
+ * @returns {200} JSON - { success: true, message: string }
+ * @returns {400|401|403|404|500} JSON - { error: string }
+ */
 export async function completePickingTaskHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -213,9 +233,10 @@ export async function completePickingTaskHandler(request, env) {
 
       const pickedQty =
         parseFloat(
-          String(
-            picked.picked_quantity ?? original.quantity_to_pick,
-          ).replace(/,/g, ""),
+          String(picked.picked_quantity ?? original.quantity_to_pick).replace(
+            /,/g,
+            "",
+          ),
         ) || 0;
       if (pickedQty <= 0 || pickedQty > original.quantity_to_pick + 0.001) {
         return new Response(
@@ -247,11 +268,7 @@ export async function completePickingTaskHandler(request, env) {
     batchStatements.push(
       env.DB.prepare(
         "UPDATE picking_tasks SET status = 'completed', completed_by_user_id = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ? AND warehouse_id = ?",
-      ).bind(
-        auth.context.user_id,
-        picking_task_id,
-        auth.context.warehouse_id,
-      ),
+      ).bind(auth.context.user_id, picking_task_id, auth.context.warehouse_id),
     );
 
     batchStatements.push(

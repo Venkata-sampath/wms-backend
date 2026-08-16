@@ -1,9 +1,14 @@
 import { corsHeaders } from "../utils/response.js";
 import { getTenantContext } from "../middleware/authMiddleware.js";
 
-// =========================================================================
-// GET /api/clients -> Fetch isolate tenant clients records
-// =========================================================================
+/**
+ * @api {GET} /api/clients
+ * @description Retrieves a list of all onboarded clients for the authenticated tenant warehouse.
+ * @access Tenant User, Tenant Admin (Super Admins denied)
+ *
+ * @returns {200} JSON - { clients: Array<Object> }
+ * @returns {401|403|500} JSON - { error: string }
+ */
 export async function getClientsHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -16,8 +21,7 @@ export async function getClientsHandler(request, env) {
   if (auth.context.role === "super_admin") {
     return new Response(
       JSON.stringify({
-        error:
-          "Access Denied: Super Admins lack workspace client assignments.",
+        error: "Access Denied: Super Admins lack workspace client assignments.",
       }),
       {
         status: 403,
@@ -45,9 +49,21 @@ export async function getClientsHandler(request, env) {
   }
 }
 
-// =========================================================================
-// POST /api/clients -> Admin-gated Client Identity Provisioner
-// =========================================================================
+/**
+ * @api {POST} /api/clients
+ * @description Onboards a new client and atomically provisions an initial default stock owner profile for the client.
+ * @access Tenant Admin Only
+ *
+ * @body {string} name - Full legal/commercial name of the client.
+ * @body {string} code - Unique client code/tag within the tenant warehouse.
+ * @body {string} [gstin] - GST Identification Number of the client.
+ * @body {string} [contact_person] - Name of the primary contact person.
+ * @body {string} [phone] - Contact phone number.
+ * @body {string} [email] - Contact email address.
+ *
+ * @returns {201} JSON - { success: true, message: string, client_id: string, default_stock_owner_id: string }
+ * @returns {400|401|403|409|500} JSON - { error: string }
+ */
 export async function createClientHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {

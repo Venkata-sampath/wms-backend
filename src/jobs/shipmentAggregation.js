@@ -1,12 +1,6 @@
-// src/jobs/shipmentAggregation.js
-// AUTHORITATIVE WATERFALL AGGREGATION MODULE (inbound), shared outbound
-// allocation engine, and outbound aggregation module.
-// Extracted verbatim from the original index.js.
-//
-// Note: allocateOutboundInventory() is also imported directly by
-// controllers/outbound.js (used by /api/outbound/verify and
-// /api/outbound/commit), in addition to being used internally by the
-// LLM-dispatch → aggregation flow in this refactor's job files.
+/** AUTHORITATIVE WATERFALL AGGREGATION MODULE (inbound), shared outbound allocation engine, and outbound aggregation module.
+
+Note: allocateOutboundInventory() is also imported directly by controllers/outbound.js (used by /api/outbound/verify and /api/outbound/commit), in addition to being used internally by the LLM-dispatch → aggregation flow in this refactor's job files. **/
 
 export async function aggregateShipmentData(shipmentId, env) {
   const { results } = await env.DB.prepare(

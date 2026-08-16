@@ -1,8 +1,4 @@
-// src/jobs/llmDispatch.js
 // LLM DISPATCH — called by llm-queue consumer.
-// Extracted verbatim from the original index.js. handleLlmDispatch() routes
-// to the outbound-specific handler internally when body.shipmentType is
-// "outbound", exactly as the monolithic file did.
 
 import {
   aggregateShipmentData,

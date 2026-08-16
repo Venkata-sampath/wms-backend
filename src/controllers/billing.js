@@ -1,10 +1,22 @@
 import { corsHeaders } from "../utils/response.js";
 import { getTenantContext } from "../middleware/authMiddleware.js";
-import { generateCloudinarySignature, destroyCloudinaryAsset } from "../utils/cloudinary.js";
+import {
+  generateCloudinarySignature,
+  destroyCloudinaryAsset,
+} from "../utils/cloudinary.js";
 
-// -------------------------------------------------------------------------
-// GET /api/billing -> List bills for this warehouse (filters: search, client_id, status)
-// -------------------------------------------------------------------------
+/**
+ * @api {GET} /api/billing
+ * @description Retrieves a paginated/filtered list of invoices/bills for the authenticated warehouse.
+ * @access Tenant Admin Only
+ *
+ * @query {string} [search] - Search keyword matching invoice number or client name.
+ * @query {string} [client_id] - Filter bills by specific client ID.
+ * @query {string} [status] - Filter bills by payment status ("pending" | "paid").
+ *
+ * @returns {200} JSON - { bills: Array<Object> }
+ * @returns {403|500} JSON - { error: string }
+ */
 export async function getBillingHandler(request, env) {
   const url = new URL(request.url);
   const auth = await getTenantContext(request, env);
@@ -65,9 +77,33 @@ export async function getBillingHandler(request, env) {
   }
 }
 
-// -------------------------------------------------------------------------
-// POST /api/billing -> Create a new bill
-// -------------------------------------------------------------------------
+/**
+ * @api {POST} /api/billing
+ * @description Creates a new bill/invoice along with its line items, sub-items, seller snapshots, and tax calculations.
+ * @access Tenant Admin Only
+ *
+ * @body {string} client_id - Target client UUID.
+ * @body {string} invoice_number - Unique invoice number inside the tenant warehouse.
+ * @body {string} invoice_date - Date of invoice generation.
+ * @body {string} [due_date] - Payment due date.
+ * @body {string} [billing_period_from] - Billing cycle start date.
+ * @body {string} [billing_period_to] - Billing cycle end date.
+ * @body {string} [reference_number] - External reference identifier.
+ * @body {string} [reference_date] - Date of external reference.
+ * @body {string} [tax_type="intra"] - Tax regime ("intra" for CGST/SGST, "inter" for IGST).
+ * @body {number} [subtotal=0] - Pre-tax total amount.
+ * @body {number} [discount=0] - Discount amount.
+ * @body {number} [other_charges=0] - Additional charges.
+ * @body {number} [cgst_amount=0] - CGST component.
+ * @body {number} [sgst_amount=0] - SGST component.
+ * @body {number} [igst_amount=0] - IGST component.
+ * @body {number} [round_off=0] - Rounding off adjustment.
+ * @body {number} [grand_total=0] - Final invoice payable amount.
+ * @body {Array<Object>} items - Array of main billing line items and their nested sub-items.
+ *
+ * @returns {201} JSON - { success: true, message: "Bill created successfully.", billing_id: string }
+ * @returns {400|403|409|500} JSON - { error: string }
+ */
 export async function createBillHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -90,9 +126,7 @@ export async function createBillHandler(request, env) {
     const client_id = String(payload.client_id || "").trim();
     const invoice_number = String(payload.invoice_number || "").trim();
     const invoice_date = String(payload.invoice_date || "").trim();
-    const due_date = payload.due_date
-      ? String(payload.due_date).trim()
-      : null;
+    const due_date = payload.due_date ? String(payload.due_date).trim() : null;
     const billing_period_from = payload.billing_period_from
       ? String(payload.billing_period_from).trim()
       : null;
@@ -146,9 +180,7 @@ export async function createBillHandler(request, env) {
     const wh_company_name = payload.wh_company_name
       ? String(payload.wh_company_name).trim()
       : null;
-    const wh_gstin = payload.wh_gstin
-      ? String(payload.wh_gstin).trim()
-      : null;
+    const wh_gstin = payload.wh_gstin ? String(payload.wh_gstin).trim() : null;
     const wh_address = payload.wh_address
       ? String(payload.wh_address).trim()
       : null;
@@ -158,9 +190,7 @@ export async function createBillHandler(request, env) {
     const wh_state_code = payload.wh_state_code
       ? String(payload.wh_state_code).trim()
       : null;
-    const wh_fssai = payload.wh_fssai
-      ? String(payload.wh_fssai).trim()
-      : null;
+    const wh_fssai = payload.wh_fssai ? String(payload.wh_fssai).trim() : null;
     const wh_bank_name = payload.wh_bank_name
       ? String(payload.wh_bank_name).trim()
       : null;
@@ -173,9 +203,7 @@ export async function createBillHandler(request, env) {
     const wh_contact = payload.wh_contact
       ? String(payload.wh_contact).trim()
       : null;
-    const wh_email = payload.wh_email
-      ? String(payload.wh_email).trim()
-      : null;
+    const wh_email = payload.wh_email ? String(payload.wh_email).trim() : null;
 
     // Buyer snapshot
     const buyer_name = payload.buyer_name
@@ -358,9 +386,7 @@ export async function createBillHandler(request, env) {
             sub.rate !== undefined && sub.rate !== null && sub.rate !== ""
               ? Number(sub.rate)
               : null,
-            sub.amount !== undefined &&
-              sub.amount !== null &&
-              sub.amount !== ""
+            sub.amount !== undefined && sub.amount !== null && sub.amount !== ""
               ? Number(sub.amount)
               : null,
             subIdx,
@@ -390,10 +416,22 @@ export async function createBillHandler(request, env) {
   }
 }
 
-// -------------------------------------------------------------------------
-// POST /api/billing/:id/attachments -> Upload one supporting file to Cloudinary
-// -------------------------------------------------------------------------
-export async function uploadBillingAttachmentHandler(request, env, matchParams) {
+/**
+ * @api {POST} /api/billing/:id/attachments
+ * @description Uploads and links an invoice attachment document or image to Cloudinary and registers it in the database.
+ * @access Tenant Admin Only
+ *
+ * @param {string} id - The unique UUID of the billing invoice.
+ * @body {FormData} formData - Multipart form data containing the file binary in the `file` field.
+ *
+ * @returns {201} JSON - { success: true, attachment: { id, file_name, file_url } }
+ * @returns {400|403|404|500} JSON - { error: string }
+ */
+export async function uploadBillingAttachmentHandler(
+  request,
+  env,
+  matchParams,
+) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
     return new Response(JSON.stringify({ error: auth.error }), {
@@ -457,9 +495,7 @@ export async function uploadBillingAttachmentHandler(request, env, matchParams) 
     );
     const cloudResult = await cloudResponse.json();
     if (!cloudResponse.ok) {
-      throw new Error(
-        cloudResult.error?.message || "Cloudinary upload failed",
-      );
+      throw new Error(cloudResult.error?.message || "Cloudinary upload failed");
     }
 
     await env.DB.prepare(
@@ -498,10 +534,21 @@ export async function uploadBillingAttachmentHandler(request, env, matchParams) 
   }
 }
 
-// -------------------------------------------------------------------------
-// DELETE /api/billing/attachments/:id -> Remove one attachment (Cloudinary + DB)
-// -------------------------------------------------------------------------
-export async function deleteBillingAttachmentHandler(request, env, matchParams) {
+/**
+ * @api {DELETE} /api/billing/attachments/:id
+ * @description Permanently deletes a specific invoice attachment from Cloudinary and removes its record from the database.
+ * @access Tenant Admin Only
+ *
+ * @param {string} id - The unique UUID of the attachment record.
+ *
+ * @returns {200} JSON - { success: true }
+ * @returns {403|404|500} JSON - { error: string }
+ */
+export async function deleteBillingAttachmentHandler(
+  request,
+  env,
+  matchParams,
+) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
     return new Response(JSON.stringify({ error: auth.error }), {
@@ -530,13 +577,10 @@ export async function deleteBillingAttachmentHandler(request, env, matchParams) 
       .first();
 
     if (!attachmentRow) {
-      return new Response(
-        JSON.stringify({ error: "Attachment not found." }),
-        {
-          status: 404,
-          headers: corsHeaders,
-        },
-      );
+      return new Response(JSON.stringify({ error: "Attachment not found." }), {
+        status: 404,
+        headers: corsHeaders,
+      });
     }
 
     await destroyCloudinaryAsset(
@@ -561,9 +605,16 @@ export async function deleteBillingAttachmentHandler(request, env, matchParams) 
   }
 }
 
-// -------------------------------------------------------------------------
-// POST /api/billing/:id/mark-paid -> One-way status transition, pending -> paid
-// -------------------------------------------------------------------------
+/**
+ * @api {POST} /api/billing/:id/mark-paid
+ * @description Marks an unpaid invoice as "paid" and records the timestamp and updating user.
+ * @access Tenant Admin Only
+ *
+ * @param {string} id - The unique UUID of the billing invoice.
+ *
+ * @returns {200} JSON - { success: true, message: "Bill marked as paid." }
+ * @returns {400|403|404|500} JSON - { error: string }
+ */
 export async function markBillPaidHandler(request, env, matchParams) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -623,9 +674,16 @@ export async function markBillPaidHandler(request, env, matchParams) {
   }
 }
 
-// -------------------------------------------------------------------------
-// GET /api/billing/:id -> Bill details, with items and attachments joined in
-// -------------------------------------------------------------------------
+/**
+ * @api {GET} /api/billing/:id
+ * @description Fetches full detail view of a single invoice, including client details, item hierarchy (main/sub-items), and attachments.
+ * @access Tenant Admin Only
+ *
+ * @param {string} id - The unique UUID of the billing invoice.
+ *
+ * @returns {200} JSON - { bill: Object, items: Array<Object>, attachments: Array<Object> }
+ * @returns {403|404|500} JSON - { error: string }
+ */
 export async function getBillDetailHandler(request, env, matchParams) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -726,9 +784,21 @@ export async function getBillDetailHandler(request, env, matchParams) {
   }
 }
 
-// -------------------------------------------------------------------------
-// PUT /api/billing/:id -> Edit a bill (only while status = 'pending')
-// -------------------------------------------------------------------------
+/**
+ * @api {PUT} /api/billing/:id
+ * @description Updates an existing unpaid bill and replaces its item line hierarchy. Paid bills cannot be edited.
+ * @access Tenant Admin Only
+ *
+ * @param {string} id - The unique UUID of the billing invoice.
+ * @body {string} client_id - Target client UUID.
+ * @body {string} invoice_number - Invoice number (validated for warehouse uniqueness).
+ * @body {string} invoice_date - Date of invoice generation.
+ * @body {string} [due_date] - Payment due date.
+ * @body {Array<Object>} items - Updated array of billing items and sub-items.
+ *
+ * @returns {200} JSON - { success: true, message: "Bill updated successfully." }
+ * @returns {400|403|404|409|500} JSON - { error: string }
+ */
 export async function updateBillHandler(request, env, matchParams) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -773,9 +843,7 @@ export async function updateBillHandler(request, env, matchParams) {
     const client_id = String(payload.client_id || "").trim();
     const invoice_number = String(payload.invoice_number || "").trim();
     const invoice_date = String(payload.invoice_date || "").trim();
-    const due_date = payload.due_date
-      ? String(payload.due_date).trim()
-      : null;
+    const due_date = payload.due_date ? String(payload.due_date).trim() : null;
     const billing_period_from = payload.billing_period_from
       ? String(payload.billing_period_from).trim()
       : null;
@@ -827,9 +895,7 @@ export async function updateBillHandler(request, env, matchParams) {
     const wh_company_name = payload.wh_company_name
       ? String(payload.wh_company_name).trim()
       : null;
-    const wh_gstin = payload.wh_gstin
-      ? String(payload.wh_gstin).trim()
-      : null;
+    const wh_gstin = payload.wh_gstin ? String(payload.wh_gstin).trim() : null;
     const wh_address = payload.wh_address
       ? String(payload.wh_address).trim()
       : null;
@@ -839,9 +905,7 @@ export async function updateBillHandler(request, env, matchParams) {
     const wh_state_code = payload.wh_state_code
       ? String(payload.wh_state_code).trim()
       : null;
-    const wh_fssai = payload.wh_fssai
-      ? String(payload.wh_fssai).trim()
-      : null;
+    const wh_fssai = payload.wh_fssai ? String(payload.wh_fssai).trim() : null;
     const wh_bank_name = payload.wh_bank_name
       ? String(payload.wh_bank_name).trim()
       : null;
@@ -854,9 +918,7 @@ export async function updateBillHandler(request, env, matchParams) {
     const wh_contact = payload.wh_contact
       ? String(payload.wh_contact).trim()
       : null;
-    const wh_email = payload.wh_email
-      ? String(payload.wh_email).trim()
-      : null;
+    const wh_email = payload.wh_email ? String(payload.wh_email).trim() : null;
 
     const buyer_name = payload.buyer_name
       ? String(payload.buyer_name).trim()
@@ -919,9 +981,7 @@ export async function updateBillHandler(request, env, matchParams) {
     )
       .bind(billingId)
       .all();
-    const existingMainIds = (existingMainItems.results || []).map(
-      (r) => r.id,
-    );
+    const existingMainIds = (existingMainItems.results || []).map((r) => r.id);
 
     const batchStatements = [
       env.DB.prepare(
@@ -934,7 +994,7 @@ export async function updateBillHandler(request, env, matchParams) {
               wh_fssai = ?, wh_bank_name = ?, wh_account_number = ?, wh_branch_ifsc = ?, wh_contact = ?, wh_email = ?,
               buyer_name = ?, buyer_gstin = ?, buyer_address = ?, buyer_state_name = ?, buyer_state_code = ?, place_of_supply = ?,
               tax_type = ?, subtotal = ?, cgst_amount = ?, sgst_amount = ?, igst_amount = ?, round_off = ?,
-              discount = ?, other_charges = ?, grand_total = ?, notes = ?, other_ref = ?,
+              discount, other_charges = ?, grand_total = ?, notes = ?, other_ref = ?,
               updated_by_user_id = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?`,
       ).bind(
@@ -1038,9 +1098,7 @@ export async function updateBillHandler(request, env, matchParams) {
             sub.rate !== undefined && sub.rate !== null && sub.rate !== ""
               ? Number(sub.rate)
               : null,
-            sub.amount !== undefined &&
-              sub.amount !== null &&
-              sub.amount !== ""
+            sub.amount !== undefined && sub.amount !== null && sub.amount !== ""
               ? Number(sub.amount)
               : null,
             subIdx,
@@ -1069,9 +1127,16 @@ export async function updateBillHandler(request, env, matchParams) {
   }
 }
 
-// -------------------------------------------------------------------------
-// DELETE /api/billing/:id -> Delete a bill (only while status = 'pending')
-// -------------------------------------------------------------------------
+/**
+ * @api {DELETE} /api/billing/:id
+ * @description Deletes an unpaid bill along with its line items and associated Cloudinary attachments. Paid bills are protected.
+ * @access Tenant Admin Only
+ *
+ * @param {string} id - The unique UUID of the billing invoice.
+ *
+ * @returns {200} JSON - { success: true }
+ * @returns {403|404|500} JSON - { error: string }
+ */
 export async function deleteBillHandler(request, env, matchParams) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {

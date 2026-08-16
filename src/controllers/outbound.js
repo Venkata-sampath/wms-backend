@@ -3,9 +3,18 @@ import { getTenantContext } from "../middleware/authMiddleware.js";
 import { generateCloudinarySignature } from "../utils/cloudinary.js";
 import { allocateOutboundInventory } from "../jobs/shipmentAggregation.js";
 
-// =========================================================================
-// POST /api/outbound/upload
-// =========================================================================
+/**
+ * @api {POST} /api/outbound/upload
+ * @description Uploads outbound shipping documents/images to Cloudinary, logs page references, and pushes them to the OCR pipeline queue for automated digitization.
+ * @access Tenant User, Tenant Admin (Super Admins denied)
+ *
+ * @body {FormData} formData - Multipart form payload:
+ * @body {File[]} formData.files - Array of image files representing pages of outbound shipment documents.
+ * @body {string[]} [formData.document_types] - Array of corresponding document type labels.
+ *
+ * @returns {200} JSON - { success: true, shipmentId: string }
+ * @returns {400|401|500} JSON - { error: string }
+ */
 export async function uploadOutboundHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -103,9 +112,14 @@ export async function uploadOutboundHandler(request, env) {
   }
 }
 
-// =========================================================================
-// GET /api/outbound/pending -> AI-upload outbound shipments awaiting verification
-// =========================================================================
+/**
+ * @api {GET} /api/outbound/pending
+ * @description Fetches all in-progress/uncompleted outbound shipments awaiting verification for the authenticated warehouse.
+ * @access Tenant User, Tenant Admin
+ *
+ * @returns {200} JSON - { shipments: Array<{ id: string, status: string, created_at: string }> }
+ * @returns {401|500} JSON - { error: string }
+ */
 export async function getPendingOutboundHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -134,9 +148,16 @@ export async function getPendingOutboundHandler(request, env) {
   }
 }
 
-// =========================================================================
-// GET /api/outbound/staged
-// =========================================================================
+/**
+ * @api {GET} /api/outbound/staged
+ * @description Retrieves the parsed staging JSON data of an outbound shipment produced by the OCR ingestion pipeline.
+ * @access Tenant User, Tenant Admin
+ *
+ * @query {string} id - The unique UUID of the staged outbound shipment.
+ *
+ * @returns {200} JSON - { id: string, status: string, staging: Object|null }
+ * @returns {401|404|500} JSON - { error: string }
+ */
 export async function getStagedOutboundHandler(request, env) {
   const url = new URL(request.url);
   const auth = await getTenantContext(request, env);
@@ -183,9 +204,22 @@ export async function getStagedOutboundHandler(request, env) {
   }
 }
 
-// =========================================================================
-// POST /api/outbound/verify
-// =========================================================================
+/**
+ * @api {POST} /api/outbound/verify
+ * @description Performs pre-commit validation and inventory availability checks (dry-run allocation) across stock owners and locations.
+ * @access Tenant User, Tenant Admin (Super Admins denied)
+ *
+ * @body {string} client_id - Target client UUID.
+ * @body {Array<Object>} lineItems - List of outbound items to verify.
+ * @body {string} lineItems[].stock_owner_id - Target stock owner UUID.
+ * @body {string} lineItems[].item_code - Product/SKU code.
+ * @body {string} lineItems[].uom - Unit of measure.
+ * @body {number} lineItems[].requested_quantity - Desired quantity to allocate.
+ * @body {string} [lineItems[].item_description] - Optional item description.
+ *
+ * @returns {200} JSON - { success: true, allocations: Array<Object> } or { success: false, errors: string[] }
+ * @returns {400|401|500} JSON - { error: string }
+ */
 export async function verifyOutboundHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -234,9 +268,8 @@ export async function verifyOutboundHandler(request, env) {
         const item_code = String(item.item_code || "").trim();
         const uom = String(item.uom || "").trim();
         const requestedQty =
-          parseFloat(
-            String(item.requested_quantity || 0).replace(/,/g, ""),
-          ) || 0;
+          parseFloat(String(item.requested_quantity || 0).replace(/,/g, "")) ||
+          0;
 
         if (!stock_owner_id) {
           errors.push(
@@ -317,9 +350,27 @@ export async function verifyOutboundHandler(request, env) {
   }
 }
 
-// =========================================================================
-// POST /api/outbound/commit
-// =========================================================================
+/**
+ * @api {POST} /api/outbound/commit
+ * @description Commits an outbound shipment order, reserves exact inventory stock rows, generates picking tasks with line items, and registers an audit transaction.
+ * @access Tenant User, Tenant Admin (Super Admins denied)
+ *
+ * @body {string} client_id - Target client UUID.
+ * @body {string} [shipmentId] - Optional staged shipment UUID (if originating from AI upload).
+ * @body {Object} [header] - Dispatch metadata.
+ * @body {string} [header.eway_bill_number] - e-Way bill number.
+ * @body {string} [header.transporter_name] - Carrier/transporter name.
+ * @body {string} [header.vehicle_number] - Transport vehicle registration number.
+ * @body {Array<Object>} lineItems - Final list of outbound item lines to commit and pick.
+ * @body {string} lineItems[].stock_owner_id - Target stock owner UUID.
+ * @body {string} lineItems[].item_code - Product/SKU code.
+ * @body {string} lineItems[].uom - Unit of measure.
+ * @body {number} lineItems[].requested_quantity - Desired quantity to fulfill.
+ * @body {string} [lineItems[].item_description] - Optional item description.
+ *
+ * @returns {200} JSON - { success: true, message: string, outbound_shipment_detail_id: string, picking_task_id: string, transaction_id: string }
+ * @returns {400|401|403|409|500} JSON - { error: string }
+ */
 export async function commitOutboundHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -405,9 +456,7 @@ export async function commitOutboundHandler(request, env) {
       const item_code = String(item.item_code || "").trim();
       const uom = String(item.uom || "").trim();
       const requestedQty =
-        parseFloat(
-          String(item.requested_quantity || 0).replace(/,/g, ""),
-        ) || 0;
+        parseFloat(String(item.requested_quantity || 0).replace(/,/g, "")) || 0;
 
       const stockOwnerRow = await env.DB.prepare(
         "SELECT id FROM stock_owners WHERE id = ? AND client_id = ? AND warehouse_id = ?",
@@ -529,11 +578,7 @@ export async function commitOutboundHandler(request, env) {
         batchStatements.push(
           env.DB.prepare(
             "UPDATE inventory SET reserved_quantity = reserved_quantity + ? WHERE id = ? AND warehouse_id = ?",
-          ).bind(
-            alloc.quantity,
-            alloc.inventory_id,
-            auth.context.warehouse_id,
-          ),
+          ).bind(alloc.quantity, alloc.inventory_id, auth.context.warehouse_id),
         );
       }
     }

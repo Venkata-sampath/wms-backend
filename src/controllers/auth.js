@@ -2,9 +2,18 @@ import { corsHeaders } from "../utils/response.js";
 import { verifyPassword, signJWT, hashPassword } from "../utils/crypto.js";
 import { getTenantContext } from "../middleware/authMiddleware.js";
 
-// -------------------------------------------------------------------------
-// 1. ENDPOINT: User Login (POST /api/auth/login) - UNPROTECTED
-// -------------------------------------------------------------------------
+/**
+ * @api {POST} /api/auth/login
+ * @description Authenticates a user, validates their operational lifecycle status, and generates a JWT.
+ * Returns the user profile including warehouse billing information.
+ * @access Public
+ *
+ * @body {string} username - The user's account username.
+ * @body {string} password - The user's account password.
+ *
+ * @returns {200} JSON - { message: "...", token: "...", user: { ... } }
+ * @returns {400|401|403|500} JSON - { error: "..." }
+ */
 export async function loginHandler(request, env) {
   try {
     const { username, password } = await request.json();
@@ -123,9 +132,18 @@ export async function loginHandler(request, env) {
   }
 }
 
-// -------------------------------------------------------------------------
-// 2. ENDPOINT: Add New User Account (POST /api/auth/register-operator) - PROTECTED
-// -------------------------------------------------------------------------
+/**
+ * @api {POST} /api/auth/register-operator
+ * @description Registers a new sub-account linked to the admin's tenant warehouse.
+ * @access Tenant Admin Only
+ *
+ * @body {string} username - The desired username for the new account.
+ * @body {string} password - The secure password for the new account.
+ * @body {string} [role="operator"] - Optional assigned role parameter (defaults to "operator").
+ *
+ * @returns {201} JSON - { message: "User account successfully activated." }
+ * @returns {400|403|409|500} JSON - { error: "..." }
+ */
 export async function registerOperatorHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -216,9 +234,17 @@ export async function registerOperatorHandler(request, env) {
   }
 }
 
-// -------------------------------------------------------------------------
-// 3. ENDPOINT: Toggle Operator Status (POST /api/auth/toggle-user-status) - PROTECTED
-// -------------------------------------------------------------------------
+/**
+ * @api {POST} /api/auth/toggle-user-status
+ * @description Updates the operational lifecycle status (active/suspended) of a specific user. Prevents cross-tenant modifications.
+ * @access Tenant Admin Only
+ *
+ * @body {string} target_user_id - The unique identifier of the user to update.
+ * @body {number} set_active - Integer representing status: `1` for active, `0` for suspended.
+ *
+ * @returns {200} JSON - { message: "User profile operational state modified successfully..." }
+ * @returns {400|403|404|500} JSON - { error: "..." }
+ */
 export async function toggleUserStatusHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -300,9 +326,14 @@ export async function toggleUserStatusHandler(request, env) {
   }
 }
 
-// -------------------------------------------------------------------------
-// 4. ENDPOINT: Fetch All Tenant Users (GET /api/users) - PROTECTED
-// -------------------------------------------------------------------------
+/**
+ * @api {GET} /api/users
+ * @description Retrieves a directory of all user accounts associated with the authenticated admin's tenant warehouse.
+ * @access Tenant Admin Only
+ *
+ * @returns {200} JSON - Array containing user records: [{ id, username, role, is_active }]
+ * @returns {403|500} JSON - { error: "..." }
+ */
 export async function getUsersHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {

@@ -2,9 +2,16 @@ import { corsHeaders } from "../utils/response.js";
 import { getTenantContext } from "../middleware/authMiddleware.js";
 import { parseAndValidateExcel } from "../utils/excel.js";
 
-// =========================================================================
-// POST /api/opening-stock/validate
-// =========================================================================
+/**
+ * @api {POST} /api/opening-stock/validate
+ * @description Parses and validates an uploaded Excel file for opening stock records without committing changes to the database.
+ * @access Authenticated Tenant User / Admin
+ *
+ * @body {FormData} formData - Multipart form data containing the uploaded Excel spreadsheet in the `file` field.
+ *
+ * @returns {200} JSON - Validation summary containing parsed rows, row count, errors, and validity flag.
+ * @returns {400|401|500} JSON - { error: string }
+ */
 export async function validateOpeningStockHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success)
@@ -37,9 +44,19 @@ export async function validateOpeningStockHandler(request, env) {
   }
 }
 
-// =========================================================================
-// POST /api/opening-stock/import
-// =========================================================================
+/**
+ * @api {POST} /api/opening-stock/import
+ * @description Parses, validates, and atomically commits opening stock records from an Excel spreadsheet into live inventory, provisioning new storage locations and audit ledger entries.
+ * @access Authenticated Tenant User / Admin
+ *
+ * @body {FormData} formData - Multipart form data payload:
+ * @body {File} formData.file - The Excel spreadsheet file.
+ * @body {string} formData.client_id - Target client UUID.
+ * @body {string} formData.stock_owner_id - Target stock owner UUID.
+ *
+ * @returns {200} JSON - { success: true, opening_stock_import_id: string, transaction_id: string, total_rows: number }
+ * @returns {400|401|500} JSON - { error: string, [errors]: Array<string> }
+ */
 export async function importOpeningStockHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success)
@@ -114,14 +131,7 @@ export async function importOpeningStockHandler(request, env) {
       env.DB.prepare(
         `INSERT INTO transactions (id, warehouse_id, reference_id, client_id, transaction_type, status, created_by_user_id, completed_by_user_id, created_at, completed_at)
          VALUES (?, ?, ?, ?, 'opening_stock', 'completed', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-      ).bind(
-        transactionId,
-        warehouseId,
-        importId,
-        clientId,
-        userId,
-        userId,
-      ),
+      ).bind(transactionId, warehouseId, importId, clientId, userId, userId),
     );
 
     // 3. Process Line Items, Locations, and Live Inventory Records

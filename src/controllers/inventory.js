@@ -1,9 +1,15 @@
 import { corsHeaders } from "../utils/response.js";
 import { getTenantContext } from "../middleware/authMiddleware.js";
 
-// =========================================================================
-// GET /api/inventory -> Select statement updated to include i.client_id
-// =========================================================================
+/**
+ * @api {GET} /api/inventory
+ * @description Retrieves the live inventory snapshot (stock balances) for the authenticated tenant warehouse.
+ * Includes detailed location mapping, client associations, batch data, and quantities.
+ * @access Tenant Admin, Tenant User (Super Admins denied)
+ *
+ * @returns {200} JSON - { inventory: Array<Object> }
+ * @returns {401|403|500} JSON - { error: string }
+ */
 export async function getInventoryHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -59,9 +65,19 @@ export async function getInventoryHandler(request, env) {
   }
 }
 
-// =========================================================================
-// POST /api/inventory/adjust -> Stock Adjustment Endpoint
-// =========================================================================
+/**
+ * @api {POST} /api/inventory/adjust
+ * @description Executes a physical stock reconciliation, overwriting system inventory balances with physical counts and logging the deltas into the ledger.
+ * @access Tenant Admin, Tenant User (Viewers denied)
+ *
+ * @body {string} remarks - Mandatory audit reason for the manual adjustment (e.g., "cycle count variance").
+ * @body {Array<Object>} items - List of adjustment payloads.
+ * @body {string} items[].inventory_id - The unique ID of the specific inventory row.
+ * @body {number} items[].physical_quantity - The newly counted absolute quantity (must be >= reserved_quantity).
+ *
+ * @returns {200} JSON - { success: true, message: string, adjustment_id: string, transaction_id: string, total_items: number }
+ * @returns {400|401|403|404|500} JSON - { error: string }
+ */
 export async function adjustInventoryHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -86,8 +102,7 @@ export async function adjustInventoryHandler(request, env) {
     if (!remarks || !String(remarks).trim()) {
       return new Response(
         JSON.stringify({
-          error:
-            "Audit remarks/reasons are mandatory for stock adjustments.",
+          error: "Audit remarks/reasons are mandatory for stock adjustments.",
         }),
         { status: 400, headers: corsHeaders },
       );
@@ -96,8 +111,7 @@ export async function adjustInventoryHandler(request, env) {
     if (!Array.isArray(items) || items.length === 0) {
       return new Response(
         JSON.stringify({
-          error:
-            "At least one inventory item must be selected for adjustment.",
+          error: "At least one inventory item must be selected for adjustment.",
         }),
         { status: 400, headers: corsHeaders },
       );

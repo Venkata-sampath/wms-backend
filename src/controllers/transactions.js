@@ -1,9 +1,14 @@
 import { corsHeaders } from "../utils/response.js";
 import { getTenantContext } from "../middleware/authMiddleware.js";
 
-// =========================================================================
-// GET /api/transactions
-// =========================================================================
+/**
+ * @api {GET} /api/transactions
+ * @description Retrieves a registry list of all warehouse transactions (inbound, opening stock, outbound, and stock adjustments) for the authenticated warehouse.
+ * @access Tenant User, Tenant Admin
+ *
+ * @returns {200} JSON - { transactions: Array<Object> }
+ * @returns {401|500} JSON - { error: string }
+ */
 export async function getTransactionsHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success)
@@ -34,13 +39,10 @@ export async function getTransactionsHandler(request, env) {
       .bind(auth.context.warehouse_id)
       .all();
 
-    return new Response(
-      JSON.stringify({ transactions: registry.results }),
-      {
-        status: 200,
-        headers: { "Content-Type": "application/json", ...corsHeaders },
-      },
-    );
+    return new Response(JSON.stringify({ transactions: registry.results }), {
+      status: 200,
+      headers: { "Content-Type": "application/json", ...corsHeaders },
+    });
   } catch (err) {
     return new Response(JSON.stringify({ error: err.message }), {
       status: 500,
@@ -49,9 +51,16 @@ export async function getTransactionsHandler(request, env) {
   }
 }
 
-// =========================================================================
-// GET /api/transactions/:id -> Unified Transaction Details Selector Fetcher
-// =========================================================================
+/**
+ * @api {GET} /api/transactions/:id
+ * @description Retrieves unified transaction details based on the specific transaction type (inbound, opening stock, outbound, or stock adjustment).
+ * @access Tenant User, Tenant Admin
+ *
+ * @param {string} id - The unique UUID of the transaction.
+ *
+ * @returns {200} JSON - Transaction record merged with specific module line items, headers, and parties.
+ * @returns {400|401|404|500} JSON - { error: string }
+ */
 export async function getTransactionDetailHandler(request, env, matchParams) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -73,13 +82,10 @@ export async function getTransactionDetailHandler(request, env, matchParams) {
       .first();
 
     if (!transaction) {
-      return new Response(
-        JSON.stringify({ error: "Transaction not found." }),
-        {
-          status: 404,
-          headers: corsHeaders,
-        },
-      );
+      return new Response(JSON.stringify({ error: "Transaction not found." }), {
+        status: 404,
+        headers: corsHeaders,
+      });
     }
 
     const resolveParty = async (partyId) => {

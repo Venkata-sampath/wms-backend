@@ -1,9 +1,16 @@
 import { corsHeaders } from "../utils/response.js";
 import { getTenantContext } from "../middleware/authMiddleware.js";
 
-// =========================================================================
-// GET /api/stock-owners -> List stock owners (Optionally filtered by client_id)
-// =========================================================================
+/**
+ * @api {GET} /api/stock-owners
+ * @description Retrieves a list of all stock owners for the authenticated warehouse, optionally filtered by a specific client ID.
+ * @access Tenant User, Tenant Admin
+ *
+ * @query {string} [client_id] - Optional client UUID to filter stock owners.
+ *
+ * @returns {200} JSON - { stock_owners: Array<Object> }
+ * @returns {401|500} JSON - { error: string }
+ */
 export async function getStockOwnersHandler(request, env) {
   const url = new URL(request.url);
   const auth = await getTenantContext(request, env);
@@ -47,9 +54,22 @@ export async function getStockOwnersHandler(request, env) {
   }
 }
 
-// =========================================================================
-// POST /api/stock-owners -> Create custom Stock Owner
-// =========================================================================
+/**
+ * @api {POST} /api/stock-owners
+ * @description Creates a new custom stock owner profile linked to a client within the warehouse tenant.
+ * @access Tenant Admin Only
+ *
+ * @body {string} client_id - Parent client UUID.
+ * @body {string} name - Name of the stock owner.
+ * @body {string} code - Unique stock owner code/tag.
+ * @body {string} [gstin] - GST Identification Number.
+ * @body {string} [contact_person] - Contact person name.
+ * @body {string} [phone] - Contact phone number.
+ * @body {string} [email] - Contact email address.
+ *
+ * @returns {201} JSON - { success: true, message: string, stock_owner_id: string }
+ * @returns {400|401|403|404|409|500} JSON - { error: string }
+ */
 export async function createStockOwnerHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {

@@ -2,9 +2,21 @@ import { corsHeaders } from "../utils/response.js";
 import { hashPassword } from "../utils/crypto.js";
 import { getTenantContext } from "../middleware/authMiddleware.js";
 
-// -------------------------------------------------------------------------
-// 1. ENDPOINT: Onboard New Warehouse Tenant & Admin (POST /api/super/warehouses)
-// -------------------------------------------------------------------------
+/**
+ * @api {POST} /api/super/warehouses
+ * @description Provisions a new warehouse tenant along with an initial warehouse admin user account.
+ * @access Super Admin Only
+ *
+ * @body {string} company_name - Legal or commercial name of the company/warehouse.
+ * @body {string} [initial_status="trial"] - Initial subscription status ("active", "trial", or "suspended").
+ * @body {string} admin_username - Username for the primary warehouse admin.
+ * @body {string} admin_password - Password for the primary warehouse admin.
+ * @body {string} [gstin] - GST Identification Number of the warehouse.
+ * @body {string} [address] - Physical address of the warehouse.
+ *
+ * @returns {201} JSON - { message: string, warehouse_id: string, admin_user_id: string }
+ * @returns {400|403|409|500} JSON - { error: string }
+ */
 export async function onboardWarehouseHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success || auth.context.role !== "super_admin") {
@@ -108,9 +120,17 @@ export async function onboardWarehouseHandler(request, env) {
   }
 }
 
-// -------------------------------------------------------------------------
-// 2. ENDPOINT: Toggle Warehouse Subscription State (POST /api/super/warehouses/subscription)
-// -------------------------------------------------------------------------
+/**
+ * @api {POST} /api/super/warehouses/subscription
+ * @description Updates the subscription status state for a targeted warehouse tenant.
+ * @access Super Admin Only
+ *
+ * @body {string} target_warehouse_id - Unique UUID of the target warehouse.
+ * @body {string} set_status - New subscription status state ("active", "suspended", or "trial").
+ *
+ * @returns {200} JSON - { message: string }
+ * @returns {400|403|404|500} JSON - { error: string }
+ */
 export async function toggleSubscriptionHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success || auth.context.role !== "super_admin") {
@@ -182,9 +202,14 @@ export async function toggleSubscriptionHandler(request, env) {
   }
 }
 
-// -------------------------------------------------------------------------
-// 3. ENDPOINT: Fetch All Warehouses Directory (GET /api/superadmin/warehouses)
-// -------------------------------------------------------------------------
+/**
+ * @api {GET} /api/superadmin/warehouses
+ * @description Retrieves a complete directory list of all registered warehouse tenant structures on the platform.
+ * @access Super Admin Only
+ *
+ * @returns {200} JSON - Array of warehouse records.
+ * @returns {403|500} JSON - { error: string }
+ */
 export async function listWarehousesHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success || auth.context.role !== "super_admin") {

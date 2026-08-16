@@ -1,9 +1,14 @@
 import { corsHeaders } from "../utils/response.js";
 import { getTenantContext } from "../middleware/authMiddleware.js";
 
-// =========================================================================
-// GET /api/putaway/pending
-// =========================================================================
+/**
+ * @api {GET} /api/putaway/pending
+ * @description Retrieves all pending putaway tasks for the authenticated tenant warehouse along with associated inbound item lines.
+ * @access Tenant User, Tenant Admin (Super Admins denied)
+ *
+ * @returns {200} JSON - { tasks: Array<Object> }
+ * @returns {401|403|500} JSON - { error: string }
+ */
 export async function getPendingPutawayTasksHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -74,9 +79,14 @@ export async function getPendingPutawayTasksHandler(request, env) {
   }
 }
 
-// =========================================================================
-// GET /api/putaway/completed
-// =========================================================================
+/**
+ * @api {GET} /api/putaway/completed
+ * @description Retrieves all completed putaway tasks for the authenticated tenant warehouse, enriched with client info, operators, completion timestamps, and location split allocations.
+ * @access Tenant User, Tenant Admin (Super Admins denied)
+ *
+ * @returns {200} JSON - { tasks: Array<Object> }
+ * @returns {401|403|500} JSON - { error: string }
+ */
 export async function getCompletedPutawayTasksHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -97,7 +107,7 @@ export async function getCompletedPutawayTasksHandler(request, env) {
     // Joined clients table to fetch client_code and client_name
     const tasksQuery = await env.DB.prepare(
       `SELECT t.id, t.shipment_id, t.created_at, d.invoice_number, c.code AS client_code, c.name AS client_name,
-                  u1.username AS verified_by, u2.username AS completed_by, tx.completed_at AS completed_date_time
+                  u1.username AS verified_by, u2.username AS completed_by, tx.completed_date_time AS completed_date_time
            FROM putaway_tasks t
            LEFT JOIN shipment_details d ON t.shipment_id = d.id
            LEFT JOIN clients c ON d.client_id = c.id
@@ -179,10 +189,21 @@ export async function getCompletedPutawayTasksHandler(request, env) {
   }
 }
 
-// =========================================================================
-// ENDPOINT: Complete Putaway Task with Dynamic Split Allocations (SECURED)
-// POST /api/putaway/complete
-// =========================================================================
+/**
+ * @api {POST} /api/putaway/complete
+ * @description Finalizes an inbound putaway task by committing split storage location allocations into live inventory balances, recording allocation logs, and completing the task/inbound transaction.
+ * @access Tenant User, Tenant Admin (Viewers denied)
+ *
+ * @body {string} putaway_task_id - Unique UUID of the pending putaway task.
+ * @body {Array<Object>} allocations - Array of location split allocations.
+ * @body {string} allocations[].item_code - Product/SKU code matching the task line item.
+ * @body {string} allocations[].location_id - Target storage location identifier.
+ * @body {number} allocations[].quantity - Quantity assigned to this storage location.
+ * @body {string} [allocations[].item_description] - Optional description of the item.
+ *
+ * @returns {200} JSON - { success: true, message: string }
+ * @returns {400|401|403|404|500} JSON - { error: string }
+ */
 export async function completePutawayTaskHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -369,11 +390,7 @@ export async function completePutawayTaskHandler(request, env) {
     batchStatements.push(
       env.DB.prepare(
         "UPDATE putaway_tasks SET status = 'completed', completed_by_user_id = ? WHERE id = ? AND warehouse_id = ?",
-      ).bind(
-        auth.context.user_id,
-        putaway_task_id,
-        auth.context.warehouse_id,
-      ),
+      ).bind(auth.context.user_id, putaway_task_id, auth.context.warehouse_id),
     );
 
     batchStatements.push(
@@ -392,8 +409,7 @@ export async function completePutawayTaskHandler(request, env) {
     return new Response(
       JSON.stringify({
         success: true,
-        message:
-          "Putaway process finalized successfully. Balances up to date.",
+        message: "Putaway process finalized successfully. Balances up to date.",
       }),
       {
         status: 200,

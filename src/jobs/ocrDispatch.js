@@ -1,6 +1,4 @@
-// src/jobs/ocrDispatch.js
 // OCR DISPATCH — called by ocr-queue consumer.
-// Extracted verbatim from the original index.js.
 
 export async function handleOcrDispatch(body, env) {
   const { pageId, shipmentId, imageUrl } = body;

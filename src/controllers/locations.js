@@ -1,9 +1,13 @@
 import { corsHeaders } from "../utils/response.js";
 import { getTenantContext } from "../middleware/authMiddleware.js";
 
-// =========================================================================
-// ENDPOINT: Get Locations with Dynamic Status
-// =========================================================================
+/**
+ * @api {GET} /api/locations
+ * @description Retrieves a list of all locations with their dynamically calculated occupancy status.
+ * If an `id` query parameter is provided, it returns the items stored in that specific location.
+ * @access Tenant User, Tenant Admin (Super Admins denied)
+ * @query {string} [id] - Optional location ID to fetch specific inventory items.
+ */
 export async function getLocationsHandler(request, env) {
   const url = new URL(request.url);
   const auth = await getTenantContext(request, env);
@@ -79,9 +83,13 @@ export async function getLocationsHandler(request, env) {
   }
 }
 
-// =========================================================================
-// ENDPOINT: Toggle Location Status (Admin Only)
-// =========================================================================
+/**
+ * @api {PATCH} /api/locations/status
+ * @description Updates the operational status (e.g., available, unavailable) of a specific warehouse location.
+ * @access Tenant Admin Only
+ * @body {string} locationId - The unique identifier of the location.
+ * @body {string} newStatus - The new status to apply to the location.
+ */
 export async function toggleLocationStatusHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success)
@@ -121,9 +129,12 @@ export async function toggleLocationStatusHandler(request, env) {
   }
 }
 
-// =========================================================================
-// ENDPOINT: Create New Storage Location (ROLE GATED: ADMIN ONLY)
-// =========================================================================
+/**
+ * @api {POST} /api/locations
+ * @description Creates and initializes a new physical storage location inside the warehouse.
+ * @access Tenant Admin Only
+ * @body {string} locationId - The text identifier/label for the new location (min 2 characters).
+ */
 export async function createLocationHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -152,8 +163,7 @@ export async function createLocationHandler(request, env) {
     if (!locationId || locationId.length < 2) {
       return new Response(
         JSON.stringify({
-          error:
-            "Invalid input: Location Identifier naming label is required.",
+          error: "Invalid input: Location Identifier naming label is required.",
         }),
         { status: 400, headers: corsHeaders },
       );

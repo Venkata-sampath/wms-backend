@@ -2,10 +2,16 @@ import { corsHeaders } from "../utils/response.js";
 import { getTenantContext } from "../middleware/authMiddleware.js";
 import { generateCloudinarySignature } from "../utils/cloudinary.js";
 
-// =========================================================================
-// ENDPOINT 1: Fetch Staged Shipment Data for verification UI (SECURED)
-// GET /api/shipments/staged
-// =========================================================================
+/**
+ * @api {GET} /api/shipments/staged
+ * @description Retrieves the staged JSON data and status of an inbound shipment for verification.
+ * @access Tenant User, Tenant Admin, Super Admin
+ *
+ * @query {string} id - The unique UUID of the inbound shipment.
+ *
+ * @returns {200} JSON - { id: string, status: string, staging_json: string }
+ * @returns {401|404|500} JSON - { error: string }
+ */
 export async function getStagedShipmentHandler(request, env) {
   const url = new URL(request.url);
   const auth = await getTenantContext(request, env);
@@ -47,10 +53,18 @@ export async function getStagedShipmentHandler(request, env) {
   });
 }
 
-// =========================================================================
-// ENDPOINT 3: Inbound Upload Endpoint (SECURED WITH CONTEXT)
-// POST /api/inbound/upload
-// =========================================================================
+/**
+ * @api {POST} /api/inbound/upload
+ * @description Uploads inbound shipment document images to Cloudinary, logs document pages, and enqueues them for asynchronous OCR processing.
+ * @access Tenant User, Tenant Admin (Super Admins denied)
+ *
+ * @body {FormData} formData - Multipart form payload:
+ * @body {File[]} formData.files - Array of image files representing inbound shipment pages.
+ * @body {string[]} [formData.document_types] - Array of corresponding document type labels.
+ *
+ * @returns {200} JSON - { success: true, shipmentId: string }
+ * @returns {400|401|500} JSON - { error: string }
+ */
 export async function uploadInboundShipmentHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -154,10 +168,16 @@ export async function uploadInboundShipmentHandler(request, env) {
   }
 }
 
-// =========================================================================
-// OCR Webhook Endpoint
-// POST /api/ocr/webhook
-// =========================================================================
+/**
+ * @api {POST} /api/ocr/webhook
+ * @description Receives OCR processing callbacks, updates document page markdown status, and enqueues tasks for LLM structured entity extraction.
+ * @access Authorized OCR Service Pod Only (`Bearer <OCR_POD_API_KEY>`)
+ *
+ * @body {Object} payload - OCR pod response payload.
+ *
+ * @returns {200} JSON - { received: true }
+ * @returns {401|404|500} JSON - { error: string }
+ */
 export async function ocrWebhookHandler(request, env) {
   const authHeader = request.headers.get("Authorization");
   if (authHeader !== `Bearer ${env.OCR_POD_API_KEY}`) {
@@ -221,10 +241,21 @@ export async function ocrWebhookHandler(request, env) {
   }
 }
 
-// =========================================================================
-// ENDPOINT 4: Verification Commit Transaction Endpoint (SECURED WITH AUDIT TRAIL)
-// POST /api/shipments/commit
-// =========================================================================
+/**
+ * @api {POST} /api/shipments/commit
+ * @description Commits verified inbound shipment data, provisions master parties, inserts shipment headers and line items, creates a pending putaway task, and logs an audit transaction.
+ * @access Tenant User, Tenant Admin (Super Admins denied)
+ *
+ * @body {string} shipmentId - The inbound shipment UUID.
+ * @body {string} client_id - Target client UUID.
+ * @body {string} stock_owner_id - Target stock owner UUID.
+ * @body {Object} header - Shipment header info (invoice number, dates, E-way bill, vehicle info, driver details).
+ * @body {Object} [parties] - Party GSTIN/address details for seller, bill_to, and ship_to roles.
+ * @body {Array<Object>} lineItems - Array of verified shipment line items.
+ *
+ * @returns {200} JSON - { success: true, message: string, putaway_task_id: string, transaction_id: string }
+ * @returns {400|401|403|500} JSON - { error: string }
+ */
 export async function commitShipmentHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -580,9 +611,14 @@ export async function commitShipmentHandler(request, env) {
   }
 }
 
-// =========================================================================
-// GET /api/shipments/pending
-// =========================================================================
+/**
+ * @api {GET} /api/shipments/pending
+ * @description Retrieves all pending/processing inbound shipments for the authenticated warehouse, enriched with uploader details and creation timestamps.
+ * @access Tenant User, Tenant Admin
+ *
+ * @returns {200} JSON - Array of pending inbound shipment records.
+ * @returns {401|500} JSON - { error: string }
+ */
 export async function getPendingShipmentsHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
