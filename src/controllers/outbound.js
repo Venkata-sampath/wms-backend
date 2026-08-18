@@ -49,7 +49,7 @@ export async function uploadOutboundHandler(request, env) {
     const shipmentId = crypto.randomUUID();
 
     await env.DB.prepare(
-      "INSERT INTO outbound_shipments (id, status, warehouse_id, uploaded_by_user_id) VALUES (?, 'processing', ?, ?)",
+      "INSERT INTO shipment_uploads (id, shipment_type, status, warehouse_id, uploaded_by_user_id) VALUES (?, 'outbound', 'processing', ?, ?)",
     )
       .bind(shipmentId, auth.context.warehouse_id, auth.context.user_id)
       .run();
@@ -85,7 +85,7 @@ export async function uploadOutboundHandler(request, env) {
       const securedUrl = cloudResult.secure_url;
 
       await env.DB.prepare(
-        "INSERT INTO document_pages (id, shipment_id, shipment_type, image_url, document_type, ocr_status) VALUES (?, ?, 'outbound', ?, ?, 'queued')",
+        "INSERT INTO document_pages (id, shipment_id, image_url, document_type, ocr_status) VALUES (?, ?, ?, ?, 'queued')",
       )
         .bind(pageId, shipmentId, securedUrl, documentType)
         .run();
@@ -114,7 +114,7 @@ export async function uploadOutboundHandler(request, env) {
 
 /**
  * @api {GET} /api/outbound/pending
- * @description Fetches all in-progress/uncompleted outbound shipments awaiting verification for the authenticated warehouse.
+ * @description Fetches all in-progress/uncompleted outbound shipment uploads awaiting verification for the authenticated warehouse.
  * @access Tenant User, Tenant Admin
  *
  * @returns {200} JSON - { shipments: Array<{ id: string, status: string, created_at: string }> }
@@ -131,7 +131,7 @@ export async function getPendingOutboundHandler(request, env) {
 
   try {
     const pending = await env.DB.prepare(
-      "SELECT id, status, created_at FROM outbound_shipments WHERE warehouse_id = ? AND status != 'completed' ORDER BY created_at DESC",
+      "SELECT id, status, created_at FROM shipment_uploads WHERE shipment_type = 'outbound' AND warehouse_id = ? AND status != 'completed' ORDER BY created_at DESC",
     )
       .bind(auth.context.warehouse_id)
       .all();
@@ -150,10 +150,10 @@ export async function getPendingOutboundHandler(request, env) {
 
 /**
  * @api {GET} /api/outbound/staged
- * @description Retrieves the parsed staging JSON data of an outbound shipment produced by the OCR ingestion pipeline.
+ * @description Retrieves the parsed staging JSON data of an outbound shipment upload produced by the OCR ingestion pipeline.
  * @access Tenant User, Tenant Admin
  *
- * @query {string} id - The unique UUID of the staged outbound shipment.
+ * @query {string} id - The unique UUID of the staged outbound shipment upload.
  *
  * @returns {200} JSON - { id: string, status: string, staging: Object|null }
  * @returns {401|404|500} JSON - { error: string }
@@ -171,7 +171,7 @@ export async function getStagedOutboundHandler(request, env) {
   try {
     const shipmentId = url.searchParams.get("id");
     const shipment = await env.DB.prepare(
-      "SELECT id, status, staging_json FROM outbound_shipments WHERE id = ? AND warehouse_id = ?",
+      "SELECT id, status, staging_json FROM shipment_uploads WHERE id = ? AND shipment_type = 'outbound' AND warehouse_id = ?",
     )
       .bind(shipmentId, auth.context.warehouse_id)
       .first();
@@ -368,7 +368,7 @@ export async function verifyOutboundHandler(request, env) {
  * @body {number} lineItems[].requested_quantity - Desired quantity to fulfill.
  * @body {string} [lineItems[].item_description] - Optional item description.
  *
- * @returns {200} JSON - { success: true, message: string, outbound_shipment_detail_id: string, picking_task_id: string, transaction_id: string }
+ * @returns {200} JSON - { success: true, message: string, outbound_detail_id: string, picking_task_id: string, transaction_id: string }
  * @returns {400|401|403|409|500} JSON - { error: string }
  */
 export async function commitOutboundHandler(request, env) {
@@ -429,10 +429,10 @@ export async function commitOutboundHandler(request, env) {
 
     // AI-upload shipments carry a shipmentId that must belong to this warehouse.
     // Manual Entry has no prior shipmentId, so this stays null and a fresh
-    // outbound_shipment_details.id is generated below.
+    // outbound_details.id is generated below.
     if (shipmentId) {
       const stagingVerification = await env.DB.prepare(
-        "SELECT id FROM outbound_shipments WHERE id = ? AND warehouse_id = ?",
+        "SELECT id FROM shipment_uploads WHERE id = ? AND shipment_type = 'outbound' AND warehouse_id = ?",
       )
         .bind(shipmentId, auth.context.warehouse_id)
         .first();
@@ -506,7 +506,7 @@ export async function commitOutboundHandler(request, env) {
 
     batchStatements.push(
       env.DB.prepare(
-        `INSERT INTO outbound_shipment_details
+        `INSERT INTO outbound_details
               (id, warehouse_id, client_id, eway_bill_number, transporter_name, vehicle_number, status, created_by_user_id, verified_by_user_id)
              VALUES (?, ?, ?, ?, ?, ?, 'pending_picking', ?, ?)`,
       ).bind(
@@ -538,8 +538,8 @@ export async function commitOutboundHandler(request, env) {
       const lineItemId = crypto.randomUUID();
       batchStatements.push(
         env.DB.prepare(
-          `INSERT INTO outbound_shipment_line_items
-                (id, outbound_shipment_detail_id, stock_owner_id, item_code, item_description, uom, requested_quantity)
+          `INSERT INTO outbound_line_items
+                (id, outbound_detail_id, stock_owner_id, item_code, item_description, uom, requested_quantity)
                VALUES (?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           lineItemId,
@@ -586,7 +586,7 @@ export async function commitOutboundHandler(request, env) {
     if (shipmentId) {
       batchStatements.push(
         env.DB.prepare(
-          "UPDATE outbound_shipments SET status = 'completed', staging_json = NULL WHERE id = ? AND warehouse_id = ?",
+          "UPDATE shipment_uploads SET status = 'completed', staging_json = NULL WHERE id = ? AND shipment_type = 'outbound' AND warehouse_id = ?",
         ).bind(shipmentId, auth.context.warehouse_id),
       );
     }
@@ -611,7 +611,7 @@ export async function commitOutboundHandler(request, env) {
       JSON.stringify({
         success: true,
         message: "Outbound commit completed and picking task generated.",
-        outbound_shipment_detail_id: outboundDetailId,
+        outbound_detail_id: outboundDetailId,
         picking_task_id: pickingTaskId,
         transaction_id: transactionId,
       }),
