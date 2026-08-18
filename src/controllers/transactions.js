@@ -27,11 +27,11 @@ export async function getTransactionsHandler(request, env) {
          COALESCE(u_inbound.username, u_os.username, u_outbound.username) AS verified_by
        FROM transactions t
        LEFT JOIN clients c ON t.client_id = c.id
-       LEFT JOIN shipment_details sd ON sd.id = t.reference_id AND t.transaction_type = 'inbound'
+       LEFT JOIN inbound_details sd ON sd.id = t.reference_id AND t.transaction_type = 'inbound'
        LEFT JOIN users u_inbound ON u_inbound.id = sd.verified_by_user_id
        LEFT JOIN opening_stock_imports osi ON osi.id = t.reference_id AND t.transaction_type = 'opening_stock'
        LEFT JOIN users u_os ON u_os.id = osi.uploaded_by_user_id
-       LEFT JOIN outbound_shipment_details osd ON osd.id = t.reference_id AND t.transaction_type = 'outbound'
+       LEFT JOIN outbound_details osd ON osd.id = t.reference_id AND t.transaction_type = 'outbound'
        LEFT JOIN users u_outbound ON u_outbound.id = osd.verified_by_user_id
        WHERE t.warehouse_id = ? AND t.transaction_type IN ('inbound', 'opening_stock', 'outbound', 'stock_adjustment')
        ORDER BY t.created_at DESC`,
@@ -106,7 +106,7 @@ export async function getTransactionDetailHandler(request, env, matchParams) {
       inbound: async () => {
         const shipment = await env.DB.prepare(
           `SELECT sd.*, u.username AS verified_by, cl.name AS client_name, cl.code AS client_code
-           FROM shipment_details sd
+           FROM inbound_details sd
            LEFT JOIN users u ON u.id = sd.verified_by_user_id
            LEFT JOIN clients cl ON sd.client_id = cl.id
            WHERE sd.id = ? AND sd.warehouse_id = ?`,
@@ -115,7 +115,7 @@ export async function getTransactionDetailHandler(request, env, matchParams) {
           .first();
 
         const lineItems = await env.DB.prepare(
-          "SELECT * FROM shipment_line_items WHERE shipment_id = ? ORDER BY rowid ASC",
+          "SELECT * FROM inbound_line_items WHERE shipment_id = ? ORDER BY rowid ASC",
         )
           .bind(transaction.reference_id)
           .all();
@@ -169,7 +169,7 @@ export async function getTransactionDetailHandler(request, env, matchParams) {
                   u_verified.username AS verified_by, 
                   cl.name AS client_name, 
                   cl.code AS client_code
-           FROM outbound_shipment_details osd
+           FROM outbound_details osd
            LEFT JOIN users u_created ON u_created.id = osd.created_by_user_id
            LEFT JOIN users u_verified ON u_verified.id = osd.verified_by_user_id
            LEFT JOIN clients cl ON osd.client_id = cl.id
@@ -180,9 +180,9 @@ export async function getTransactionDetailHandler(request, env, matchParams) {
 
         const lineItems = await env.DB.prepare(
           `SELECT osli.*, so.name AS stock_owner_name, so.code AS stock_owner_code
-           FROM outbound_shipment_line_items osli
+           FROM outbound_line_items osli
            LEFT JOIN stock_owners so ON osli.stock_owner_id = so.id
-           WHERE osli.outbound_shipment_detail_id = ? 
+           WHERE osli.outbound_detail_id = ? 
            ORDER BY osli.rowid ASC`,
         )
           .bind(transaction.reference_id)
