@@ -1,6 +1,19 @@
 import { corsHeaders } from "../utils/response.js";
 import { getTenantContext } from "../middleware/authMiddleware.js";
-import { generateCloudinarySignature } from "../utils/cloudinary.js";
+import {
+  generateCloudinarySignature,
+  destroyCloudinaryAsset,
+} from "../utils/cloudinary.js";
+
+/**
+ * Helper to extract the Cloudinary public_id from a secure URL.
+ * Strips domain, upload prefix, optional transformations, version prefix (v123...), and file extension.
+ */
+function extractCloudinaryPublicId(url) {
+  if (!url || typeof url !== "string") return null;
+  const match = url.match(/\/upload\/(?:[^\/]+\/)*(?:v\d+\/)?([^\.]+)/);
+  return match ? match[1] : null;
+}
 
 /**
  * @api {GET} /api/inbound/staged
@@ -482,8 +495,8 @@ export async function commitInboundHandler(request, env) {
       env.DB.prepare(
         `INSERT INTO inbound_details (
       id, invoice_number, invoice_date, po_number, lr_number, e_way_bill_number, vehicle_number, driver_name, driver_phone_number,
-      seller_party_id, bill_to_party_id, ship_to_party_id, additional_data, warehouse_id, verified_by_user_id, client_id, stock_owner_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      seller_party_id, bill_to_party_id, ship_to_party_id, warehouse_id, verified_by_user_id, client_id, stock_owner_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         inboundDetailId,
         String(header.invoice_number || "").trim(),
@@ -497,9 +510,6 @@ export async function commitInboundHandler(request, env) {
         resolvedPartyIds.seller,
         resolvedPartyIds.bill_to,
         resolvedPartyIds.ship_to,
-        payload.additional_data
-          ? JSON.stringify(payload.additional_data)
-          : null,
         auth.context.warehouse_id,
         auth.context.user_id,
         client_id,
@@ -645,10 +655,10 @@ export async function commitInboundHandler(request, env) {
 
 /**
  * @api {GET} /api/inbound/pending
- * @description Retrieves all pending/processing inbound shipment uploads for the authenticated warehouse, enriched with uploader details and creation timestamps.
+ * @description Retrieves all pending, processing, and failed inbound shipment uploads for the authenticated warehouse, enriched with uploader details and creation timestamps.
  * @access Tenant User, Tenant Admin
  *
- * @returns {200} JSON - Array of pending inbound shipment upload records.
+ * @returns {200} JSON - Array of inbound shipment upload records.
  * @returns {401|500} JSON - { error: string }
  */
 export async function getPendingInboundHandler(request, env) {
@@ -660,14 +670,15 @@ export async function getPendingInboundHandler(request, env) {
     });
   }
 
-  // Fetch only active/pending work for the current warehouse, enriched with
-  // uploader identity and timestamp so the frontend queue is more useful.
+  // Fetch active, pending verification, and failed uploads for the current warehouse
   const shipments = await env.DB.prepare(
     `
         SELECT s.id, s.status, s.created_at, s.uploaded_by_user_id, u.username AS uploaded_by_username
         FROM shipment_uploads s
         LEFT JOIN users u ON s.uploaded_by_user_id = u.id
-        WHERE s.shipment_type = 'inbound' AND s.warehouse_id = ? AND s.status IN ('processing', 'pending_verification')
+        WHERE s.shipment_type = 'inbound' 
+          AND s.warehouse_id = ? 
+          AND s.status IN ('processing', 'pending_verification', 'failed')
         ORDER BY s.created_at DESC
         `,
   )
@@ -678,4 +689,102 @@ export async function getPendingInboundHandler(request, env) {
     status: 200,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
+}
+
+/**
+ * @api {DELETE} /api/inbound/shipment
+ * @description Deletes an inbound shipment upload, destroys its Cloudinary document assets, and cleans up document_pages via cascade.
+ * @access Tenant User, Tenant Admin, Super Admin
+ *
+ * @query {string} id - The UUID of the shipment upload to delete.
+ *
+ * @returns {200} JSON - { success: true, message: string }
+ * @returns {400|401|404|500} JSON - { error: string }
+ */
+export async function deleteInboundShipmentHandler(request, env) {
+  const auth = await getTenantContext(request, env);
+  if (!auth.success) {
+    return new Response(JSON.stringify({ error: auth.error }), {
+      status: auth.status,
+      headers: corsHeaders,
+    });
+  }
+
+  const url = new URL(request.url);
+  const shipmentId = url.searchParams.get("id");
+
+  if (!shipmentId) {
+    return new Response(JSON.stringify({ error: "Shipment ID is required" }), {
+      status: 400,
+      headers: corsHeaders,
+    });
+  }
+
+  try {
+    // 1. Verify existence and ownership
+    const shipment = await env.DB.prepare(
+      `SELECT id FROM shipment_uploads 
+       WHERE id = ? AND shipment_type = 'inbound' AND (? = 'super_admin' OR warehouse_id = ?)`,
+    )
+      .bind(shipmentId, auth.context.role, auth.context.warehouse_id)
+      .first();
+
+    if (!shipment) {
+      return new Response(
+        JSON.stringify({
+          error: "Shipment not found or access unauthorized",
+        }),
+        {
+          status: 404,
+          headers: corsHeaders,
+        },
+      );
+    }
+
+    // 2. Query all document pages to retrieve image URLs for Cloudinary cleanup
+    const { results: pages } = await env.DB.prepare(
+      "SELECT image_url FROM document_pages WHERE shipment_id = ?",
+    )
+      .bind(shipmentId)
+      .all();
+
+    // 3. Destroy Cloudinary assets per page; isolate failures so one bad asset doesn't abort cleanup
+    for (const page of pages) {
+      const publicId = extractCloudinaryPublicId(page.image_url);
+      if (publicId) {
+        try {
+          await destroyCloudinaryAsset(publicId, "image", env);
+        } catch (err) {
+          console.error(
+            `Failed to destroy Cloudinary asset (${publicId}):`,
+            err.message,
+          );
+        }
+      }
+    }
+
+    // 4. Delete the shipment upload record (document_pages cascade on DELETE)
+    await env.DB.prepare(
+      "DELETE FROM shipment_uploads WHERE id = ? AND shipment_type = 'inbound' AND (? = 'super_admin' OR warehouse_id = ?)",
+    )
+      .bind(shipmentId, auth.context.role, auth.context.warehouse_id)
+      .run();
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        message:
+          "Shipment and associated document assets deleted successfully.",
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json", ...corsHeaders },
+      },
+    );
+  } catch (err) {
+    return new Response(JSON.stringify({ error: err.message }), {
+      status: 500,
+      headers: corsHeaders,
+    });
+  }
 }
