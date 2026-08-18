@@ -220,7 +220,7 @@ export async function aggregateShipmentData(shipmentId, env) {
   };
 
   await env.DB.prepare(
-    "UPDATE inbound_shipments SET staging_json = ?, status = 'pending_verification' WHERE id = ?",
+    "UPDATE shipment_uploads SET staging_json = ?, status = 'pending_verification' WHERE id = ? AND shipment_type = 'inbound'",
   )
     .bind(JSON.stringify(completeStagingManifest), shipmentId)
     .run();
@@ -287,7 +287,7 @@ export async function allocateOutboundInventory(
 // ===========================================================================
 export async function aggregateOutboundShipmentData(shipmentId, env) {
   const { results } = await env.DB.prepare(
-    "SELECT raw_extracted_json FROM document_pages WHERE shipment_id = ? AND shipment_type = 'outbound' AND llm_status = 'completed'",
+    "SELECT raw_extracted_json FROM document_pages WHERE shipment_id = ? AND llm_status = 'completed'",
   )
     .bind(shipmentId)
     .all();
@@ -334,7 +334,7 @@ export async function aggregateOutboundShipmentData(shipmentId, env) {
   };
 
   await env.DB.prepare(
-    "UPDATE outbound_shipments SET staging_json = ?, status = 'pending_verification' WHERE id = ?",
+    "UPDATE shipment_uploads SET staging_json = ?, status = 'pending_verification' WHERE id = ? AND shipment_type = 'outbound'",
   )
     .bind(JSON.stringify(completeStagingManifest), shipmentId)
     .run();
