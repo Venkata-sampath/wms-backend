@@ -3,7 +3,7 @@ DROP TABLE IF EXISTS picking_task_items;
 CREATE TABLE picking_task_items (
     id TEXT PRIMARY KEY,
     picking_task_id TEXT NOT NULL REFERENCES picking_tasks(id) ON DELETE CASCADE,
-    outbound_shipment_line_item_id TEXT NOT NULL REFERENCES outbound_shipment_line_items(id) ON DELETE CASCADE,
+    outbound_shipment_line_item_id TEXT NOT NULL REFERENCES outbound_line_items(id) ON DELETE CASCADE,
     inventory_id TEXT NOT NULL REFERENCES inventory(id),
     location_id TEXT NOT NULL,
     stock_owner_id TEXT NOT NULL REFERENCES stock_owners(id),
