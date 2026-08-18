@@ -3,21 +3,10 @@
 import {
   aggregateShipmentData,
   aggregateOutboundShipmentData,
+  determineAggregationPrimary,
 } from "./shipmentAggregation.js";
 
-export async function handleLlmDispatch(body, env) {
-  const { pageId, markdown, shipmentId, documentType } = body;
-  const shipmentType =
-    body.shipmentType === "outbound" ? "outbound" : "inbound";
-
-  if (shipmentType === "outbound") {
-    return handleOutboundLlmDispatch(
-      { pageId, markdown, shipmentId, documentType },
-      env,
-    );
-  }
-
-  const SYSTEM_PROMPT = `Convert this OCR markdown into a clean, structured JSON object adhering exactly to the schema blueprint defined below.
+const FULL_SCHEMA_PROMPT = `Convert this OCR markdown into a clean, structured JSON object adhering exactly to the schema blueprint defined below.
 
 GENERAL RULES:
 - Do not include any terms and conditions or legal declarations.
@@ -100,6 +89,65 @@ line_items:
 - cgst, sgst, igst, cess: The actual calculated currency tax values for that row item. Do not leave blank if zero; use "0.00".
 - total_amount: The final grand total for that item row (taxable_amount + taxes).`;
 
+const E_WAY_BILL_PROMPT = `Convert this OCR markdown of an E-Way Bill into a clean, structured JSON object adhering exactly to the schema blueprint defined below.
+
+GENERAL RULES:
+- All keys must be lowercase_snake_case without exception.
+- Return only a single valid JSON block without any explanatory dialogue.
+
+CANONICAL SCHEMA BLUEPRINT:
+{
+  "e_way_bill_number": ""
+}
+
+FIELD-SPECIFIC ENFORCEMENT RULES:
+
+e_way_bill_number:
+- the e way bill number is exactly 12 digit numeric code so dont extract any other number as e way bill number.`;
+
+const LR_PROMPT = `Convert this OCR markdown of a Lorry Receipt (LR) / Consignment Note into a clean, structured JSON object adhering exactly to the schema blueprint defined below.
+
+GENERAL RULES:
+- All keys must be lowercase_snake_case without exception.
+- Return only a single valid JSON block without any explanatory dialogue.
+
+CANONICAL SCHEMA BLUEPRINT:
+{
+  "lr_number": ""
+}
+
+FIELD-SPECIFIC ENFORCEMENT RULES:
+
+lr_number:
+- the lr number is also known as the consignment note number. It is usually a combination of letters and numbers, often starting with a prefix that indicates the transport company or region. Extract it as it appears in the document.
+- if you find consignment note number in the document, use it as lr_number. If not, search for lr number or consignment number. If none of these are found, leave the field empty.`;
+
+const PROMPTS = {
+  tax_invoice: FULL_SCHEMA_PROMPT,
+  delivery_challan: FULL_SCHEMA_PROMPT,
+  e_way_bill: E_WAY_BILL_PROMPT,
+  lr: LR_PROMPT,
+};
+
+export async function handleLlmDispatch(body, env) {
+  const { pageId, markdown, shipmentId, documentType } = body;
+  const shipmentType =
+    body.shipmentType === "outbound" ? "outbound" : "inbound";
+
+  if (shipmentType === "outbound") {
+    return handleOutboundLlmDispatch(
+      { pageId, markdown, shipmentId, documentType },
+      env,
+    );
+  }
+
+  const SYSTEM_PROMPT = PROMPTS[documentType];
+  if (!SYSTEM_PROMPT) {
+    throw new Error(
+      `Invalid or unsupported inbound document type: ${documentType}`,
+    );
+  }
+
   const payload = {
     model: env.MODEL,
     messages: [
@@ -148,13 +196,57 @@ line_items:
     .run();
 
   const { results: shipmentPages } = await env.DB.prepare(
-    "SELECT id, llm_status FROM document_pages WHERE shipment_id = ?",
+    "SELECT id, document_type, ocr_status, llm_status FROM document_pages WHERE shipment_id = ?",
   )
     .bind(shipmentId)
     .all();
 
-  if (shipmentPages.every((p) => p.llm_status === "completed")) {
-    await aggregateShipmentData(shipmentId, env);
+  const pagesByDocType = {};
+  shipmentPages.forEach((p) => {
+    if (!pagesByDocType[p.document_type]) {
+      pagesByDocType[p.document_type] = [];
+    }
+    pagesByDocType[p.document_type].push(p);
+  });
+
+  const isTerminal = (p) =>
+    p.llm_status === "completed" ||
+    p.llm_status === "failed" ||
+    p.ocr_status === "failed";
+
+  const primaryDocType = determineAggregationPrimary(pagesByDocType);
+
+  if (!primaryDocType) {
+    await env.DB.prepare(
+      "UPDATE shipment_uploads SET status = 'failed' WHERE id = ?",
+    )
+      .bind(shipmentId)
+      .run();
+    return;
+  }
+
+  const primaryPages = pagesByDocType[primaryDocType];
+  const hasCompletedPrimary = primaryPages.some(
+    (p) => p.llm_status === "completed",
+  );
+
+  if (hasCompletedPrimary) {
+    const allNonPrimaryTerminal = shipmentPages
+      .filter((p) => p.document_type !== primaryDocType)
+      .every(isTerminal);
+
+    if (allNonPrimaryTerminal) {
+      await aggregateShipmentData(shipmentId, env);
+    }
+  } else {
+    const allPrimaryTerminal = primaryPages.every(isTerminal);
+    if (allPrimaryTerminal) {
+      await env.DB.prepare(
+        "UPDATE shipment_uploads SET status = 'failed' WHERE id = ?",
+      )
+        .bind(shipmentId)
+        .run();
+    }
   }
 }
 
