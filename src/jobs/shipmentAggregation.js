@@ -1,6 +1,23 @@
-/** AUTHORITATIVE WATERFALL AGGREGATION MODULE (inbound), shared outbound allocation engine, and outbound aggregation module.
+/** AUTHORITATIVE AGGREGATION MODULE (inbound), shared outbound allocation engine, and outbound aggregation module.
 
 Note: allocateOutboundInventory() is also imported directly by controllers/outbound.js (used by /api/outbound/verify and /api/outbound/commit), in addition to being used internally by the LLM-dispatch → aggregation flow in this refactor's job files. **/
+
+// Exported helper to determine the primary document type for inbound shipments
+export function determineAggregationPrimary(pagesByDocType) {
+  if (
+    pagesByDocType["tax_invoice"] &&
+    pagesByDocType["tax_invoice"].length > 0
+  ) {
+    return "tax_invoice";
+  }
+  if (
+    pagesByDocType["delivery_challan"] &&
+    pagesByDocType["delivery_challan"].length > 0
+  ) {
+    return "delivery_challan";
+  }
+  return null;
+}
 
 export async function aggregateShipmentData(shipmentId, env) {
   const { results } = await env.DB.prepare(
@@ -8,19 +25,6 @@ export async function aggregateShipmentData(shipmentId, env) {
   )
     .bind(shipmentId)
     .all();
-
-  const orderedPriorities = [
-    "tax_invoice",
-    "delivery_challan",
-    "lr",
-    "e_way_bill",
-  ];
-
-  // Specific document priorities for custom header fields
-  const fieldPriorities = {
-    e_way_bill_number: ["e_way_bill", "tax_invoice", "delivery_challan", "lr"],
-    lr_number: ["lr", "tax_invoice", "delivery_challan", "e_way_bill"],
-  };
 
   // Group all pages by document type into arrays
   const pagesByDocType = {};
@@ -39,26 +43,60 @@ export async function aggregateShipmentData(shipmentId, env) {
     }
   });
 
-  // Rule 1 — Header Fields: doc-type priority, then first non-empty page within that type
-  const resolveField = (fieldName) => {
-    const priorities = fieldPriorities[fieldName] || orderedPriorities;
-    for (const type of priorities) {
-      const pages = pagesByDocType[type];
-      if (!pages) continue;
-      for (const data of pages) {
-        if (data && data[fieldName] !== undefined && data[fieldName] !== null) {
-          const strVal = String(data[fieldName]).trim();
-          if (strVal !== "") return strVal;
-        }
+  const primaryDocType = determineAggregationPrimary(pagesByDocType);
+
+  // If no valid primary document is found, mark as failed and return early
+  if (!primaryDocType) {
+    await env.DB.prepare(
+      "UPDATE shipment_uploads SET status = 'failed' WHERE id = ? AND shipment_type = 'inbound'",
+    )
+      .bind(shipmentId)
+      .run();
+    return;
+  }
+
+  const primaryPages = pagesByDocType[primaryDocType] || [];
+
+  // Resolves a field strictly from the primary document type
+  const resolveFromPrimary = (fieldName) => {
+    for (const data of primaryPages) {
+      if (data && data[fieldName] !== undefined && data[fieldName] !== null) {
+        const strVal = String(data[fieldName]).trim();
+        if (strVal !== "") return strVal;
       }
     }
     return "";
   };
 
-  // Rule 2 — Parties: Refactored to only 3 roles (seller, bill_to, ship_to)
-  // and 3 simplified fields (name, gstin, address).
+  // Dedicated explicit overrides for e_way_bill_number and lr_number
+  let finalEWayBillNumber = resolveFromPrimary("e_way_bill_number");
+  if (pagesByDocType["e_way_bill"] && pagesByDocType["e_way_bill"].length > 0) {
+    for (const data of pagesByDocType["e_way_bill"]) {
+      if (data && data["e_way_bill_number"]) {
+        const strVal = String(data["e_way_bill_number"]).trim();
+        if (strVal !== "") {
+          finalEWayBillNumber = strVal;
+          break;
+        }
+      }
+    }
+  }
+
+  let finalLrNumber = resolveFromPrimary("lr_number");
+  if (pagesByDocType["lr"] && pagesByDocType["lr"].length > 0) {
+    for (const data of pagesByDocType["lr"]) {
+      if (data && data["lr_number"]) {
+        const strVal = String(data["lr_number"]).trim();
+        if (strVal !== "") {
+          finalLrNumber = strVal;
+          break;
+        }
+      }
+    }
+  }
+
+  // Normalize and parse 3 simplified party fields strictly from the primary document
   const normalizeParty = (partyObj) => {
-    // Supports both new schema (name/address) and fallback legacy keys (legal_name/physical_address)
     const rawName = partyObj.name || partyObj.legal_name || "";
     const rawAddress = partyObj.address || partyObj.physical_address || "";
     const rawGstin = partyObj.gstin || "";
@@ -73,38 +111,27 @@ export async function aggregateShipmentData(shipmentId, env) {
   const countPopulated = (normalized) =>
     Object.values(normalized).filter((v) => v !== "").length;
 
-  const resolveParty = (partyRole) => {
+  const resolvePartyFromPrimary = (partyRole) => {
     let best = null;
     let bestScore = -1;
-    let bestPriorityIndex = Infinity;
 
-    orderedPriorities.forEach((type, priorityIndex) => {
-      const pages = pagesByDocType[type];
-      if (!pages) return;
+    primaryPages.forEach((data) => {
+      const partyData = data?.parties?.[partyRole] || data?.[partyRole];
 
-      pages.forEach((data) => {
-        // Support either root-level or nested data.parties structure from LLM output
-        const partyData = data?.parties?.[partyRole] || data?.[partyRole];
+      if (
+        partyData &&
+        typeof partyData === "object" &&
+        !Array.isArray(partyData)
+      ) {
+        const normalized = normalizeParty(partyData);
+        const score = countPopulated(normalized);
+        if (score === 0) return;
 
-        if (
-          partyData &&
-          typeof partyData === "object" &&
-          !Array.isArray(partyData)
-        ) {
-          const normalized = normalizeParty(partyData);
-          const score = countPopulated(normalized);
-          if (score === 0) return;
-
-          if (
-            score > bestScore ||
-            (score === bestScore && priorityIndex < bestPriorityIndex)
-          ) {
-            best = normalized;
-            bestScore = score;
-            bestPriorityIndex = priorityIndex;
-          }
+        if (score > bestScore) {
+          best = normalized;
+          bestScore = score;
         }
-      });
+      }
     });
 
     return (
@@ -116,66 +143,29 @@ export async function aggregateShipmentData(shipmentId, env) {
     );
   };
 
-  // Rule 3 — Line Items: merge from the first document type with valid line items
+  // Merge line items strictly from the primary document type
   let targetedLineItemsArray = [];
-  for (const type of orderedPriorities) {
-    const pages = pagesByDocType[type];
-    if (!pages) continue;
-
-    const hasLineItems = pages.some(
-      (data) =>
-        data && Array.isArray(data.line_items) && data.line_items.length > 0,
-    );
-
-    if (hasLineItems) {
-      targetedLineItemsArray = pages.reduce((acc, data) => {
-        if (
-          data &&
-          Array.isArray(data.line_items) &&
-          data.line_items.length > 0
-        ) {
-          acc.push(...data.line_items);
-        }
-        return acc;
-      }, []);
-      break;
+  for (const data of primaryPages) {
+    if (data && Array.isArray(data.line_items) && data.line_items.length > 0) {
+      targetedLineItemsArray.push(...data.line_items);
     }
   }
 
-  // Aggregate additional_data across raw pages
-  let combinedAdditional = [];
-  results.forEach((row) => {
-    if (!row.raw_extracted_json) return;
-    try {
-      const data = JSON.parse(row.raw_extracted_json);
-      if (
-        data.additional_data &&
-        typeof data.additional_data === "object" &&
-        Object.keys(data.additional_data).length > 0
-      ) {
-        combinedAdditional.push({
-          extracted_from_document_type: row.document_type,
-          ...data.additional_data,
-        });
-      }
-    } catch (e) {}
-  });
-
   const completeStagingManifest = {
     header: {
-      invoice_number: resolveField("invoice_number"),
-      invoice_date: resolveField("invoice_date"),
-      po_number: resolveField("po_number"),
-      lr_number: resolveField("lr_number"),
-      e_way_bill_number: resolveField("e_way_bill_number"),
-      vehicle_number: resolveField("vehicle_number"),
-      driver_name: resolveField("driver_name"),
-      driver_phone_number: resolveField("driver_phone_number"),
+      invoice_number: resolveFromPrimary("invoice_number"),
+      invoice_date: resolveFromPrimary("invoice_date"),
+      po_number: resolveFromPrimary("po_number"),
+      lr_number: finalLrNumber,
+      e_way_bill_number: finalEWayBillNumber,
+      vehicle_number: resolveFromPrimary("vehicle_number"),
+      driver_name: resolveFromPrimary("driver_name"),
+      driver_phone_number: resolveFromPrimary("driver_phone_number"),
     },
     parties: {
-      seller: resolveParty("seller"),
-      bill_to: resolveParty("bill_to"),
-      ship_to: resolveParty("ship_to"),
+      seller: resolvePartyFromPrimary("seller"),
+      bill_to: resolvePartyFromPrimary("bill_to"),
+      ship_to: resolvePartyFromPrimary("ship_to"),
     },
     lineItems: targetedLineItemsArray.map((item, index) => {
       const rawItemCode = String(item.item_code || "").trim();
@@ -216,7 +206,6 @@ export async function aggregateShipmentData(shipmentId, env) {
         expiry_date: "",
       };
     }),
-    additional_data: combinedAdditional,
   };
 
   await env.DB.prepare(

@@ -61,8 +61,7 @@ Your JSON must strictly match this exact template structure. Populate fields if 
       "cess": "", 
       "total_amount": "" 
     } 
-  ],
-  "additional_data": {}
+  ]
 }
 
 FIELD-SPECIFIC ENFORCEMENT RULES:
@@ -99,11 +98,7 @@ line_items:
 - taxable_amount: The final tax-eligible value of the line after subtracting discounts, but before adding GST.
 - tax_rate_percent: The combined or individual GST percentage rate applied to the row (e.g., "18%", "28%").
 - cgst, sgst, igst, cess: The actual calculated currency tax values for that row item. Do not leave blank if zero; use "0.00".
-- total_amount: The final grand total for that item row (taxable_amount + taxes).
-
-
-additional_data:
-- place all other keys which arent specified in the schema in this additional data object.`;
+- total_amount: The final grand total for that item row (taxable_amount + taxes).`;
 
   const payload = {
     model: env.MODEL,
