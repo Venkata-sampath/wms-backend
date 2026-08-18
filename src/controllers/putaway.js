@@ -107,7 +107,7 @@ export async function getCompletedPutawayTasksHandler(request, env) {
     // Joined clients table to fetch client_code and client_name
     const tasksQuery = await env.DB.prepare(
       `SELECT t.id, t.shipment_id, t.created_at, d.invoice_number, c.code AS client_code, c.name AS client_name,
-                  u1.username AS verified_by, u2.username AS completed_by, tx.completed_date_time AS completed_date_time
+                  u1.username AS verified_by, u2.username AS completed_by, tx.completed_at AS completed_date_time
            FROM putaway_tasks t
            LEFT JOIN inbound_details d ON t.shipment_id = d.id
            LEFT JOIN clients c ON d.client_id = c.id
