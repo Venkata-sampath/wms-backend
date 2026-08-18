@@ -26,7 +26,7 @@ export async function getPendingPickingTasksHandler(request, env) {
               u.username AS created_by
        FROM picking_tasks pt
        LEFT JOIN clients c ON pt.client_id = c.id
-       LEFT JOIN outbound_shipment_details osd ON pt.outbound_shipment_detail_id = osd.id
+       LEFT JOIN outbound_details osd ON pt.outbound_shipment_detail_id = osd.id
        LEFT JOIN users u ON pt.created_by_user_id = u.id
        WHERE pt.warehouse_id = ? AND pt.status = 'pending'
        ORDER BY pt.created_at ASC`,
@@ -97,7 +97,7 @@ export async function getCompletedPickingTasksHandler(request, env) {
               u2.username AS completed_by
        FROM picking_tasks pt
        LEFT JOIN clients c ON pt.client_id = c.id
-       LEFT JOIN outbound_shipment_details osd ON pt.outbound_shipment_detail_id = osd.id
+       LEFT JOIN outbound_details osd ON pt.outbound_shipment_detail_id = osd.id
        LEFT JOIN users u1 ON pt.created_by_user_id = u1.id
        LEFT JOIN users u2 ON pt.completed_by_user_id = u2.id
        WHERE pt.warehouse_id = ? AND pt.status = 'completed'
@@ -273,7 +273,7 @@ export async function completePickingTaskHandler(request, env) {
 
     batchStatements.push(
       env.DB.prepare(
-        "UPDATE outbound_shipment_details SET status = 'completed' WHERE id = ? AND warehouse_id = ?",
+        "UPDATE outbound_details SET status = 'completed' WHERE id = ? AND warehouse_id = ?",
       ).bind(
         originalTask.outbound_shipment_detail_id,
         auth.context.warehouse_id,
