@@ -1,7 +1,20 @@
 import { corsHeaders } from "../utils/response.js";
 import { getTenantContext } from "../middleware/authMiddleware.js";
-import { generateCloudinarySignature } from "../utils/cloudinary.js";
+import {
+  generateCloudinarySignature,
+  destroyCloudinaryAsset,
+} from "../utils/cloudinary.js";
 import { allocateOutboundInventory } from "../jobs/shipmentAggregation.js";
+
+/**
+ * Helper to extract the Cloudinary public_id from a secure URL.
+ * Strips domain, upload prefix, optional transformations, version prefix (v123...), and file extension.
+ */
+function extractCloudinaryPublicId(url) {
+  if (!url || typeof url !== "string") return null;
+  const match = url.match(/\/upload\/(?:[^\/]+\/)*(?:v\d+\/)?([^\.]+)/);
+  return match ? match[1] : null;
+}
 
 /**
  * @api {POST} /api/outbound/upload
@@ -114,7 +127,7 @@ export async function uploadOutboundHandler(request, env) {
 
 /**
  * @api {GET} /api/outbound/pending
- * @description Fetches all in-progress/uncompleted outbound shipment uploads awaiting verification for the authenticated warehouse.
+ * @description Fetches all in-progress, pending-verification, or failed outbound shipment uploads awaiting action for the authenticated warehouse.
  * @access Tenant User, Tenant Admin
  *
  * @returns {200} JSON - { shipments: Array<{ id: string, status: string, created_at: string }> }
@@ -131,7 +144,12 @@ export async function getPendingOutboundHandler(request, env) {
 
   try {
     const pending = await env.DB.prepare(
-      "SELECT id, status, created_at FROM shipment_uploads WHERE shipment_type = 'outbound' AND warehouse_id = ? AND status != 'completed' ORDER BY created_at DESC",
+      `SELECT id, status, created_at 
+       FROM shipment_uploads 
+       WHERE shipment_type = 'outbound' 
+         AND warehouse_id = ? 
+         AND status IN ('processing', 'pending_verification', 'failed')
+       ORDER BY created_at DESC`,
     )
       .bind(auth.context.warehouse_id)
       .all();
@@ -624,6 +642,104 @@ export async function commitOutboundHandler(request, env) {
     return new Response(JSON.stringify({ error: err.message }), {
       status: 500,
       headers: { "Content-Type": "application/json", ...corsHeaders },
+    });
+  }
+}
+
+/**
+ * @api {DELETE} /api/outbound/shipment
+ * @description Deletes an outbound shipment upload, destroys its Cloudinary document assets, and cleans up document_pages via cascade.
+ * @access Tenant User, Tenant Admin, Super Admin
+ *
+ * @query {string} id - The UUID of the outbound shipment upload to delete.
+ *
+ * @returns {200} JSON - { success: true, message: string }
+ * @returns {400|401|404|500} JSON - { error: string }
+ */
+export async function deleteOutboundShipmentHandler(request, env) {
+  const auth = await getTenantContext(request, env);
+  if (!auth.success) {
+    return new Response(JSON.stringify({ error: auth.error }), {
+      status: auth.status,
+      headers: corsHeaders,
+    });
+  }
+
+  const url = new URL(request.url);
+  const shipmentId = url.searchParams.get("id");
+
+  if (!shipmentId) {
+    return new Response(JSON.stringify({ error: "Shipment ID is required" }), {
+      status: 400,
+      headers: corsHeaders,
+    });
+  }
+
+  try {
+    // 1. Verify existence and ownership
+    const shipment = await env.DB.prepare(
+      `SELECT id FROM shipment_uploads 
+       WHERE id = ? AND shipment_type = 'outbound' AND (? = 'super_admin' OR warehouse_id = ?)`,
+    )
+      .bind(shipmentId, auth.context.role, auth.context.warehouse_id)
+      .first();
+
+    if (!shipment) {
+      return new Response(
+        JSON.stringify({
+          error: "Outbound shipment not found or access unauthorized",
+        }),
+        {
+          status: 404,
+          headers: corsHeaders,
+        },
+      );
+    }
+
+    // 2. Query all document pages to retrieve image URLs for Cloudinary cleanup
+    const { results: pages } = await env.DB.prepare(
+      "SELECT image_url FROM document_pages WHERE shipment_id = ?",
+    )
+      .bind(shipmentId)
+      .all();
+
+    // 3. Destroy Cloudinary assets per page; isolate failures so one bad asset doesn't abort cleanup
+    for (const page of pages) {
+      const publicId = extractCloudinaryPublicId(page.image_url);
+      if (publicId) {
+        try {
+          await destroyCloudinaryAsset(publicId, "image", env);
+        } catch (err) {
+          console.error(
+            `Failed to destroy Cloudinary asset (${publicId}):`,
+            err.message,
+          );
+        }
+      }
+    }
+
+    // 4. Delete the shipment upload record (document_pages cascade on DELETE)
+    await env.DB.prepare(
+      "DELETE FROM shipment_uploads WHERE id = ? AND shipment_type = 'outbound' AND (? = 'super_admin' OR warehouse_id = ?)",
+    )
+      .bind(shipmentId, auth.context.role, auth.context.warehouse_id)
+      .run();
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        message:
+          "Outbound shipment and associated document assets deleted successfully.",
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json", ...corsHeaders },
+      },
+    );
+  } catch (err) {
+    return new Response(JSON.stringify({ error: err.message }), {
+      status: 500,
+      headers: corsHeaders,
     });
   }
 }
