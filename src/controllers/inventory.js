@@ -38,8 +38,8 @@ export async function getInventoryHandler(request, env) {
  FROM inventory i
  LEFT JOIN clients c ON i.client_id = c.id
  LEFT JOIN stock_owners so ON i.stock_owner_id = so.id
- LEFT JOIN shipment_line_items sli ON i.shipment_line_item_id = sli.id
- LEFT JOIN shipment_details sd ON sli.shipment_id = sd.id
+ LEFT JOIN inbound_line_items sli ON i.shipment_line_item_id = sli.id
+ LEFT JOIN inbound_details sd ON sli.shipment_id = sd.id
  LEFT JOIN users u_verified ON sd.verified_by_user_id = u_verified.id
  LEFT JOIN putaway_task_items pti ON i.source_reference_id = pti.id AND i.inventory_source = 'putaway'
  LEFT JOIN putaway_tasks pt ON pti.putaway_task_id = pt.id
