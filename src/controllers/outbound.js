@@ -656,7 +656,7 @@ export async function commitOutboundHandler(request, env) {
  * @returns {200} JSON - { success: true, message: string }
  * @returns {400|401|404|500} JSON - { error: string }
  */
-export async function deleteOutboundShipmentHandler(request, env) {
+export async function deleteOutboundShipmentHandler(request, env, matchParams) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
     return new Response(JSON.stringify({ error: auth.error }), {
@@ -666,7 +666,8 @@ export async function deleteOutboundShipmentHandler(request, env) {
   }
 
   const url = new URL(request.url);
-  const shipmentId = url.searchParams.get("id");
+  const shipmentId =
+    (matchParams && matchParams[1]) || url.searchParams.get("id");
 
   if (!shipmentId) {
     return new Response(JSON.stringify({ error: "Shipment ID is required" }), {

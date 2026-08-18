@@ -51,6 +51,7 @@ import {
   commitInboundHandler,
   getPendingInboundHandler,
   getStagedInboundHandler,
+  deleteInboundShipmentHandler,
 } from "./controllers/inbound.js";
 import {
   uploadOutboundHandler,
@@ -58,6 +59,7 @@ import {
   getStagedOutboundHandler,
   verifyOutboundHandler,
   commitOutboundHandler,
+  deleteOutboundShipmentHandler,
 } from "./controllers/outbound.js";
 import {
   getPendingPickingTasksHandler,
@@ -247,6 +249,11 @@ export const routes = [
     path: "/api/inbound/staged",
     handler: getStagedInboundHandler,
   },
+  {
+    method: "DELETE",
+    pattern: /^\/api\/inbound\/([^/]+)$/,
+    handler: deleteInboundShipmentHandler,
+  },
 
   // -------------------------------------------------------------------------
   // OUTBOUND (AI Upload + Manual Entry share verify/commit)
@@ -275,6 +282,11 @@ export const routes = [
     method: "POST",
     path: "/api/outbound/commit",
     handler: commitOutboundHandler,
+  },
+  {
+    method: "DELETE",
+    pattern: /^\/api\/outbound\/([^/]+)$/,
+    handler: deleteOutboundShipmentHandler,
   },
 
   // -------------------------------------------------------------------------
