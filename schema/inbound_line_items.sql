@@ -1,8 +1,8 @@
-DROP TABLE IF EXISTS shipment_line_items;
+DROP TABLE IF EXISTS inbound_line_items;
 
-CREATE TABLE shipment_line_items (
+CREATE TABLE inbound_line_items (
     id TEXT PRIMARY KEY,
-    shipment_id TEXT REFERENCES inbound_shipments(id) ON DELETE CASCADE,
+    shipment_id TEXT REFERENCES inbound_details(id) ON DELETE CASCADE,
     item_code TEXT,
     item_description TEXT NOT NULL,
     hsn_sac TEXT,

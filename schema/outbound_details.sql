@@ -1,7 +1,7 @@
-DROP TABLE IF EXISTS outbound_shipment_details;
+DROP TABLE IF EXISTS outbound_details;
 
-CREATE TABLE outbound_shipment_details (
-    id TEXT PRIMARY KEY, -- for AI uploads this equals outbound_shipments.id; for manual entry it is freshly generated
+CREATE TABLE outbound_details (
+    id TEXT PRIMARY KEY, -- for AI uploads this equals shipment_uploads.id; for manual entry it is freshly generated
     warehouse_id TEXT NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
     client_id TEXT NOT NULL REFERENCES clients(id),
     eway_bill_number TEXT,

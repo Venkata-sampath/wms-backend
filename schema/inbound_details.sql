@@ -1,7 +1,7 @@
-DROP TABLE IF EXISTS shipment_details;
+DROP TABLE IF EXISTS inbound_details;
 
-CREATE TABLE shipment_details (
-    id TEXT PRIMARY KEY REFERENCES inbound_shipments(id) ON DELETE CASCADE,
+CREATE TABLE inbound_details (
+    id TEXT PRIMARY KEY, -- for AI uploads this equals shipment_uploads.id; for manual entry it is freshly generated
     warehouse_id TEXT NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
     stock_owner_id TEXT NOT NULL REFERENCES stock_owners(id),
     verified_by_user_id TEXT NOT NULL REFERENCES users(id),      
