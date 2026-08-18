@@ -29,7 +29,7 @@ export async function getPendingPutawayTasksHandler(request, env) {
     const tasksQuery = await env.DB.prepare(
       `SELECT t.id, t.shipment_id, t.created_at, d.invoice_number, c.code AS client_code, c.name AS client_name, u.username AS verified_by
        FROM putaway_tasks t
-       LEFT JOIN shipment_details d ON t.shipment_id = d.id
+       LEFT JOIN inbound_details d ON t.shipment_id = d.id
        LEFT JOIN clients c ON d.client_id = c.id
        LEFT JOIN users u ON d.verified_by_user_id = u.id
        WHERE t.warehouse_id = ? AND t.status = 'pending'
@@ -109,7 +109,7 @@ export async function getCompletedPutawayTasksHandler(request, env) {
       `SELECT t.id, t.shipment_id, t.created_at, d.invoice_number, c.code AS client_code, c.name AS client_name,
                   u1.username AS verified_by, u2.username AS completed_by, tx.completed_date_time AS completed_date_time
            FROM putaway_tasks t
-           LEFT JOIN shipment_details d ON t.shipment_id = d.id
+           LEFT JOIN inbound_details d ON t.shipment_id = d.id
            LEFT JOIN clients c ON d.client_id = c.id
            LEFT JOIN users u1 ON d.verified_by_user_id = u1.id
            LEFT JOIN users u2 ON t.completed_by_user_id = u2.id
@@ -244,7 +244,7 @@ export async function completePutawayTaskHandler(request, env) {
     const originalTask = await env.DB.prepare(
       `SELECT pt.id, pt.shipment_id, pt.client_id, sd.stock_owner_id 
    FROM putaway_tasks pt 
-   JOIN shipment_details sd ON pt.shipment_id = sd.id 
+   JOIN inbound_details sd ON pt.shipment_id = sd.id 
    WHERE pt.id = ? AND pt.warehouse_id = ? AND pt.status = 'pending'`,
     )
       .bind(putaway_task_id, auth.context.warehouse_id)
@@ -265,7 +265,7 @@ export async function completePutawayTaskHandler(request, env) {
           pti.expiry_date, pti.batch_number, pti.shipment_line_item_id, pti.uom, 
           sli.case_conversion_qty 
           FROM putaway_task_items pti
-          LEFT JOIN shipment_line_items sli ON pti.shipment_line_item_id = sli.id
+          LEFT JOIN inbound_line_items sli ON pti.shipment_line_item_id = sli.id
           WHERE pti.putaway_task_id = ?`,
     )
       .bind(putaway_task_id)
