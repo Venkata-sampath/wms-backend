@@ -253,7 +253,7 @@ line_items:
     .run();
 
   const { results: shipmentPages } = await env.DB.prepare(
-    "SELECT id, llm_status FROM document_pages WHERE shipment_id = ? AND shipment_type = 'outbound'",
+    "SELECT id, llm_status FROM document_pages WHERE shipment_id = ?",
   )
     .bind(shipmentId)
     .all();
