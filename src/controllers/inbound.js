@@ -3,16 +3,16 @@ import { getTenantContext } from "../middleware/authMiddleware.js";
 import { generateCloudinarySignature } from "../utils/cloudinary.js";
 
 /**
- * @api {GET} /api/shipments/staged
- * @description Retrieves the staged JSON data and status of an inbound shipment for verification.
+ * @api {GET} /api/inbound/staged
+ * @description Retrieves the staged JSON data and status of an inbound shipment upload for verification.
  * @access Tenant User, Tenant Admin, Super Admin
  *
- * @query {string} id - The unique UUID of the inbound shipment.
+ * @query {string} id - The unique UUID of the inbound shipment upload.
  *
  * @returns {200} JSON - { id: string, status: string, staging_json: string }
  * @returns {401|404|500} JSON - { error: string }
  */
-export async function getStagedShipmentHandler(request, env) {
+export async function getStagedInboundHandler(request, env) {
   const url = new URL(request.url);
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
@@ -28,8 +28,8 @@ export async function getStagedShipmentHandler(request, env) {
   const data = await env.DB.prepare(
     `
         SELECT id, status, staging_json 
-        FROM inbound_shipments 
-        WHERE id = ? AND (? = 'super_admin' OR warehouse_id = ?)
+        FROM shipment_uploads 
+        WHERE id = ? AND shipment_type = 'inbound' AND (? = 'super_admin' OR warehouse_id = ?)
       `,
   )
     .bind(shipmentId, auth.context.role, auth.context.warehouse_id)
@@ -65,7 +65,7 @@ export async function getStagedShipmentHandler(request, env) {
  * @returns {200} JSON - { success: true, shipmentId: string }
  * @returns {400|401|500} JSON - { error: string }
  */
-export async function uploadInboundShipmentHandler(request, env) {
+export async function uploadInboundHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
     return new Response(JSON.stringify({ error: auth.error }), {
@@ -104,9 +104,9 @@ export async function uploadInboundShipmentHandler(request, env) {
 
     // Security Injection: Insert and lock this processing stream straight to the caller's warehouse account
     await env.DB.prepare(
-      "INSERT INTO inbound_shipments (id, status, warehouse_id, uploaded_by_user_id) VALUES (?, 'processing', ?, ?)",
+      "INSERT INTO shipment_uploads (id, shipment_type, status, warehouse_id, uploaded_by_user_id) VALUES (?, 'inbound', 'processing', ?, ?)",
     )
-      .bind(shipmentId, auth.context.warehouse_id, auth.context.user_id) // Add user_id here
+      .bind(shipmentId, auth.context.warehouse_id, auth.context.user_id)
       .run();
 
     for (let i = 0; i < files.length; i++) {
@@ -140,7 +140,7 @@ export async function uploadInboundShipmentHandler(request, env) {
       const securedUrl = cloudResult.secure_url;
 
       await env.DB.prepare(
-        "INSERT INTO document_pages (id, shipment_id, shipment_type, image_url, document_type, ocr_status) VALUES (?, ?, 'inbound', ?, ?, 'queued')",
+        "INSERT INTO document_pages (id, shipment_id, image_url, document_type, ocr_status) VALUES (?, ?, ?, ?, 'queued')",
       )
         .bind(pageId, shipmentId, securedUrl, documentType)
         .run();
@@ -203,8 +203,16 @@ export async function ocrWebhookHandler(request, env) {
       });
     }
 
+    // shipment_type no longer lives on document_pages (removed with the
+    // inbound_shipments/outbound_shipments merge into shipment_uploads),
+    // so it's resolved here via a join for the downstream LLM queue message.
     const page = await env.DB.prepare(
-      "SELECT id, shipment_id, shipment_type, document_type FROM document_pages WHERE ocr_job_id = ?",
+      `
+        SELECT dp.id, dp.shipment_id, dp.document_type, su.shipment_type
+        FROM document_pages dp
+        JOIN shipment_uploads su ON su.id = dp.shipment_id
+        WHERE dp.ocr_job_id = ?
+      `,
     )
       .bind(jobId)
       .first();
@@ -242,11 +250,11 @@ export async function ocrWebhookHandler(request, env) {
 }
 
 /**
- * @api {POST} /api/shipments/commit
- * @description Commits verified inbound shipment data, provisions master parties, inserts shipment headers and line items, creates a pending putaway task, and logs an audit transaction.
+ * @api {POST} /api/inbound/commit
+ * @description Commits verified inbound shipment data, provisions master parties, inserts shipment headers and line items, creates a pending putaway task, and logs an audit transaction. Supports both AI-upload (shipmentId present) and Manual Entry (shipmentId omitted) flows.
  * @access Tenant User, Tenant Admin (Super Admins denied)
  *
- * @body {string} shipmentId - The inbound shipment UUID.
+ * @body {string} [shipmentId] - Optional staged shipment_uploads UUID (if originating from AI upload). Omitted for Manual Entry.
  * @body {string} client_id - Target client UUID.
  * @body {string} stock_owner_id - Target stock owner UUID.
  * @body {Object} header - Shipment header info (invoice number, dates, E-way bill, vehicle info, driver details).
@@ -256,7 +264,7 @@ export async function ocrWebhookHandler(request, env) {
  * @returns {200} JSON - { success: true, message: string, putaway_task_id: string, transaction_id: string }
  * @returns {400|401|403|500} JSON - { error: string }
  */
-export async function commitShipmentHandler(request, env) {
+export async function commitInboundHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
     return new Response(JSON.stringify({ error: auth.error }), {
@@ -328,20 +336,25 @@ export async function commitShipmentHandler(request, env) {
       );
     }
 
-    const stagingVerification = await env.DB.prepare(
-      "SELECT id FROM inbound_shipments WHERE id = ? AND warehouse_id = ?",
-    )
-      .bind(shipmentId, auth.context.warehouse_id)
-      .first();
+    // AI-upload shipments carry a shipmentId that must belong to this warehouse.
+    // Manual Entry has no prior shipmentId, so this stays null/undefined and a
+    // fresh inbound_details.id is generated below.
+    if (shipmentId) {
+      const stagingVerification = await env.DB.prepare(
+        "SELECT id FROM shipment_uploads WHERE id = ? AND shipment_type = 'inbound' AND warehouse_id = ?",
+      )
+        .bind(shipmentId, auth.context.warehouse_id)
+        .first();
 
-    if (!stagingVerification) {
-      return new Response(
-        JSON.stringify({
-          error:
-            "Unauthorized manipulation attempt detected. Record access denied.",
-        }),
-        { status: 403, headers: corsHeaders },
-      );
+      if (!stagingVerification) {
+        return new Response(
+          JSON.stringify({
+            error:
+              "Unauthorized manipulation attempt detected. Record access denied.",
+          }),
+          { status: 403, headers: corsHeaders },
+        );
+      }
     }
 
     const roles = ["seller", "bill_to", "ship_to"];
@@ -427,42 +440,52 @@ export async function commitShipmentHandler(request, env) {
 
     const batchStatements = [];
 
-    // Idempotency cleanups
-    batchStatements.push(
-      env.DB.prepare(
-        "DELETE FROM shipment_details WHERE id = ? AND warehouse_id = ?",
-      ).bind(shipmentId, auth.context.warehouse_id),
-    );
-    batchStatements.push(
-      env.DB.prepare(
-        "DELETE FROM shipment_line_items WHERE shipment_id = ? AND shipment_id IN (SELECT id FROM inbound_shipments WHERE warehouse_id = ?)",
-      ).bind(shipmentId, auth.context.warehouse_id),
-    );
-    batchStatements.push(
-      env.DB.prepare(
-        "DELETE FROM putaway_task_items WHERE putaway_task_id IN (SELECT id FROM putaway_tasks WHERE shipment_id = ? AND warehouse_id = ?)",
-      ).bind(shipmentId, auth.context.warehouse_id),
-    );
-    batchStatements.push(
-      env.DB.prepare(
-        "DELETE FROM putaway_tasks WHERE shipment_id = ? AND warehouse_id = ?",
-      ).bind(shipmentId, auth.context.warehouse_id),
-    );
-    batchStatements.push(
-      env.DB.prepare(
-        "DELETE FROM transactions WHERE reference_id = ? AND warehouse_id = ? AND transaction_type = 'inbound'",
-      ).bind(shipmentId, auth.context.warehouse_id),
-    );
+    // The committed record's id: for AI-upload flows this equals the staged
+    // shipmentId (kept stable so a retried commit cleans up after itself
+    // below); for Manual Entry (no shipmentId) a fresh id is generated and
+    // there is nothing prior to clean up.
+    const inboundDetailId = shipmentId || crypto.randomUUID();
 
-    // Write shipment_details + client_id + stock_owner_id
+    // Idempotency cleanups — only relevant when re-committing an AI-upload
+    // shipment against the same id; Manual Entry always gets a fresh id so
+    // there is nothing to clean up.
+    if (shipmentId) {
+      batchStatements.push(
+        env.DB.prepare(
+          "DELETE FROM inbound_details WHERE id = ? AND warehouse_id = ?",
+        ).bind(inboundDetailId, auth.context.warehouse_id),
+      );
+      batchStatements.push(
+        env.DB.prepare(
+          "DELETE FROM inbound_line_items WHERE shipment_id = ?",
+        ).bind(inboundDetailId),
+      );
+      batchStatements.push(
+        env.DB.prepare(
+          "DELETE FROM putaway_task_items WHERE putaway_task_id IN (SELECT id FROM putaway_tasks WHERE shipment_id = ? AND warehouse_id = ?)",
+        ).bind(inboundDetailId, auth.context.warehouse_id),
+      );
+      batchStatements.push(
+        env.DB.prepare(
+          "DELETE FROM putaway_tasks WHERE shipment_id = ? AND warehouse_id = ?",
+        ).bind(inboundDetailId, auth.context.warehouse_id),
+      );
+      batchStatements.push(
+        env.DB.prepare(
+          "DELETE FROM transactions WHERE reference_id = ? AND warehouse_id = ? AND transaction_type = 'inbound'",
+        ).bind(inboundDetailId, auth.context.warehouse_id),
+      );
+    }
+
+    // Write inbound_details + client_id + stock_owner_id
     batchStatements.push(
       env.DB.prepare(
-        `INSERT INTO shipment_details (
+        `INSERT INTO inbound_details (
       id, invoice_number, invoice_date, po_number, lr_number, e_way_bill_number, vehicle_number, driver_name, driver_phone_number,
       seller_party_id, bill_to_party_id, ship_to_party_id, additional_data, warehouse_id, verified_by_user_id, client_id, stock_owner_id
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
-        shipmentId,
+        inboundDetailId,
         String(header.invoice_number || "").trim(),
         String(header.invoice_date || "").trim(),
         String(header.po_number || "").trim(),
@@ -489,7 +512,12 @@ export async function commitShipmentHandler(request, env) {
     batchStatements.push(
       env.DB.prepare(
         "INSERT INTO putaway_tasks (id, warehouse_id, shipment_id, status, client_id) VALUES (?, ?, ?, 'pending', ?)",
-      ).bind(putawayTaskId, auth.context.warehouse_id, shipmentId, client_id),
+      ).bind(
+        putawayTaskId,
+        auth.context.warehouse_id,
+        inboundDetailId,
+        client_id,
+      ),
     );
 
     if (Array.isArray(lineItems)) {
@@ -505,7 +533,7 @@ export async function commitShipmentHandler(request, env) {
 
         batchStatements.push(
           env.DB.prepare(
-            `INSERT INTO shipment_line_items (
+            `INSERT INTO inbound_line_items (
           id, shipment_id, item_code, item_description, hsn_sac, ordered_quantity, uom, rate, gross_amount,
           discount_amount, taxable_amount, tax_rate_percent, cgst, sgst, igst, cess, total_amount, category,
           received_quantity, damaged_quantity, shortage_quantity, excess_quantity, discrepancy_uom, discrepancy_notes,
@@ -513,7 +541,7 @@ export async function commitShipmentHandler(request, env) {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             lineItemId,
-            shipmentId,
+            inboundDetailId,
             String(item.item_code || "").trim(),
             String(item.item_description || "Unknown Item").trim(),
             String(item.hsn_sac || "").trim(),
@@ -567,11 +595,15 @@ export async function commitShipmentHandler(request, env) {
       }
     }
 
-    batchStatements.push(
-      env.DB.prepare(
-        "UPDATE inbound_shipments SET status = 'completed', staging_json = NULL WHERE id = ? AND warehouse_id = ?",
-      ).bind(shipmentId, auth.context.warehouse_id),
-    );
+    // Only AI-upload shipments have a shipment_uploads row to close out.
+    // Manual Entry never created one, so there's nothing to update here.
+    if (shipmentId) {
+      batchStatements.push(
+        env.DB.prepare(
+          "UPDATE shipment_uploads SET status = 'completed', staging_json = NULL WHERE id = ? AND shipment_type = 'inbound' AND warehouse_id = ?",
+        ).bind(shipmentId, auth.context.warehouse_id),
+      );
+    }
 
     // Create transactions + client_id
     const transactionId = "txn_" + crypto.randomUUID();
@@ -582,7 +614,7 @@ export async function commitShipmentHandler(request, env) {
       ).bind(
         transactionId,
         auth.context.warehouse_id,
-        shipmentId,
+        inboundDetailId,
         auth.context.user_id,
         client_id,
       ),
@@ -612,14 +644,14 @@ export async function commitShipmentHandler(request, env) {
 }
 
 /**
- * @api {GET} /api/shipments/pending
- * @description Retrieves all pending/processing inbound shipments for the authenticated warehouse, enriched with uploader details and creation timestamps.
+ * @api {GET} /api/inbound/pending
+ * @description Retrieves all pending/processing inbound shipment uploads for the authenticated warehouse, enriched with uploader details and creation timestamps.
  * @access Tenant User, Tenant Admin
  *
- * @returns {200} JSON - Array of pending inbound shipment records.
+ * @returns {200} JSON - Array of pending inbound shipment upload records.
  * @returns {401|500} JSON - { error: string }
  */
-export async function getPendingShipmentsHandler(request, env) {
+export async function getPendingInboundHandler(request, env) {
   const auth = await getTenantContext(request, env);
   if (!auth.success) {
     return new Response(JSON.stringify({ error: auth.error }), {
@@ -633,9 +665,9 @@ export async function getPendingShipmentsHandler(request, env) {
   const shipments = await env.DB.prepare(
     `
         SELECT s.id, s.status, s.created_at, s.uploaded_by_user_id, u.username AS uploaded_by_username
-        FROM inbound_shipments s
+        FROM shipment_uploads s
         LEFT JOIN users u ON s.uploaded_by_user_id = u.id
-        WHERE s.warehouse_id = ? AND s.status IN ('processing', 'pending_verification')
+        WHERE s.shipment_type = 'inbound' AND s.warehouse_id = ? AND s.status IN ('processing', 'pending_verification')
         ORDER BY s.created_at DESC
         `,
   )
